@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+#pip install colorama
+#ejemplo: python PyFping.py -f hosts.txt --monitor --interval 2 --timeout 1 --fail-threshold 3 --recovery-threshold 2 --only-changes --log upgrade.log --csv upgrade.csv
+#Peski la mueve co
 
 import argparse
 import concurrent.futures
