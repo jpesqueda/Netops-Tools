@@ -27,8 +27,6 @@ from urllib.request import Request, urlopen
 SESSION = "/ServicesAPI/API/V1/Session"
 DEFAULT_OUTPUT = "netbrain_endpoint_report.csv"
 DEFAULT_ENDPOINTS = [
-    "/ServicesAPI/API/V1/CMDB/IP/OneIPTable",
-    "/ServicesAPI/API/V1/CMDB/Topology/OneIPTable",
     "/ServicesAPI/API/V1/CMDB/Devices/ConnectedSwitchPorts",
     "/ServicesAPI/API/V1/CMDB/Devices/EndSystemConnectedSwitchPorts",
     "/ServicesAPI/API/V1/CMDB/Devices/EndSystem/ConnectedSwitchPorts",
@@ -78,7 +76,7 @@ ALIASES = {
     "switch_name": "switch switchname connecteddevice devicename device_name hostname name sourcedevice".split(),
     "switch_ip": "switchip deviceip mgmtip managementip management_ip".split(),
     "switch_port": "port portname interface interfacename intfname localinterface interfacename".split(),
-    "port_description": "description descr portdescription interfacedescription".split(),
+    "port_description": "portdescription interfacedescription ifdescription intfdescription descr".split(),
     "vlan": "vlan vlanid accessvlan nativevlan".split(),
     "vrf": "vrf vrfname".split(),
     "site": "site sitepath".split(),
@@ -88,6 +86,7 @@ ALIASES = {
     "model": "model platform".split(),
     "serial": "serial sn serialnumber".split(),
 }
+IGNORE_KEYS = {"statuscode", "statusdescription", "status", "message", "error", "errors"}
 
 
 class NetBrainError(RuntimeError):
@@ -214,7 +213,7 @@ def main() -> int:
                 nb,
                 target,
                 args.endpoint_path or DEFAULT_ENDPOINTS,
-                scan_oneip=args.oneip_scan,
+                scan_oneip=args.oneip_scan or not args.no_oneip_scan,
                 oneip_count=args.oneip_count,
             )
             rows.extend(target_rows)
@@ -246,7 +245,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--output", default=DEFAULT_OUTPUT, help="CSV de salida")
     p.add_argument("--raw-json", help="Guardar respuestas crudas")
     p.add_argument("--endpoint-path", action="append", help="Endpoint exacto de switchport")
-    p.add_argument("--oneip-scan", action="store_true", help="Escanea One-IP Table si el filtro por IP/MAC no devuelve datos")
+    p.add_argument("--oneip-scan", action="store_true", help="Compatibilidad: el escaneo One-IP ya viene activo por default")
+    p.add_argument("--no-oneip-scan", action="store_true", help="No escanear One-IP Table si el filtro directo no devuelve datos")
     p.add_argument("--oneip-count", type=int, default=10000, help="Registros por pagina al usar --oneip-scan")
     p.add_argument("--insecure", action="store_true", help="No validar TLS")
     p.add_argument("--timeout", type=int, default=30)
@@ -361,7 +361,9 @@ def lookup(
                 raw.append({"method": method, "path": path, "key": key, "response": result})
                 records = records_from(result)
                 if records:
-                    return [row_from(target, rec, "found", path) for rec in records], raw
+                    rows = useful_rows(target, records, path)
+                    if rows:
+                        return rows, raw
 
     if target["type"] == "ip":
         device = nb.try_call("GET", "/ServicesAPI/API/V1/CMDB/Devices", params={"ip": target["value"], "fullattr": 1})
@@ -380,7 +382,9 @@ def lookup(
                 if result:
                     raw.append({"method": method, "path": path, "key": key, "response": result})
                 if records:
-                    return [row_from(target, rec, "found", path) for rec in records], raw
+                    rows = useful_rows(target, records, path)
+                    if rows:
+                        return rows, raw
 
     return [empty_row(target, "not-found")], raw
 
@@ -408,11 +412,14 @@ def oneip_lookup(
             if result:
                 raw.append({"path": path, "params": params, "response": result})
             if records:
-                return [row_from(target, rec, "found", path) for rec in records], raw
+                rows = useful_rows(target, records, path)
+                if rows:
+                    return rows, raw
 
     if not scan:
         return [], raw
 
+    print(f"  Escaneando One-IP Table para {target['value']}...")
     for path in paths:
         begin = 0
         while True:
@@ -423,7 +430,9 @@ def oneip_lookup(
                 raw.append({"path": path, "params": params, "record_count": len(records)})
             matches = filter_target_records(records, target)
             if matches:
-                return [row_from(target, rec, "found", path) for rec in matches], raw
+                rows = useful_rows(target, matches, path)
+                if rows:
+                    return rows, raw
             if len(records) < count:
                 break
             begin += count
@@ -443,13 +452,42 @@ def filter_target_records(records: list[dict[str, Any]], target: dict[str, str])
     return matches
 
 
+def useful_rows(target: dict[str, str], records: list[dict[str, Any]], source: str) -> list[dict[str, str]]:
+    rows = [row_from(target, record, "found", source) for record in records]
+    return [row for row in rows if has_real_endpoint_data(row, target)]
+
+
+def has_real_endpoint_data(row: dict[str, str], target: dict[str, str]) -> bool:
+    useful_fields = [
+        "endpoint_mac",
+        "endpoint_name",
+        "switch_name",
+        "switch_ip",
+        "switch_port",
+        "vlan",
+        "vrf",
+        "site",
+        "location",
+        "device_type",
+        "vendor",
+        "model",
+        "serial",
+    ]
+    if any(row.get(field) for field in useful_fields):
+        return True
+    if target["type"] == "mac" and row.get("endpoint_ip"):
+        return True
+    return False
+
+
 def records_from(data: Any) -> list[dict[str, Any]]:
     if isinstance(data, list):
         return [x for x in data if isinstance(x, dict)]
     if not isinstance(data, dict):
         return []
     for key in (
-        "oneIPTable oneIpTable oneiptable ipTable iptable ipTables records rows "
+        "oneIPTable oneIpTable oneiptable oneIPTables oneIpTables oneIpTableList "
+        "ipTable iptable ipTables ipList table list records rows "
         "connectedSwitchPorts connectedSwitchPort switchPorts switchPort ports "
         "interfaces results data items devices"
     ).split():
@@ -459,13 +497,18 @@ def records_from(data: Any) -> list[dict[str, Any]]:
         if isinstance(value, dict):
             return records_from(value) or [value]
     metadata = {"statuscode", "statusdescription", "totalresultcount", "total", "count"}
-    if all(clean(k) in metadata for k in data):
+    clean_keys = {clean(k) for k in data}
+    if clean_keys <= metadata or clean_keys <= (metadata | IGNORE_KEYS):
         return []
     return [data]
 
 
 def row_from(target: dict[str, str], rec: dict[str, Any], status: str, source: str) -> dict[str, str]:
-    flat = {clean(k): stringify(v) for k, v in flatten(rec).items()}
+    flat = {
+        clean(k): stringify(v)
+        for k, v in flatten(rec).items()
+        if clean(k) not in IGNORE_KEYS
+    }
     row = empty_row(target, status)
     row["source_api"] = source
     for col, aliases in ALIASES.items():
@@ -520,7 +563,11 @@ def pick(flat: dict[str, str], aliases: list[str]) -> str:
     for alias in aliases:
         if alias in flat:
             return flat[alias]
-    return next((v for k, v in flat.items() if any(k.endswith(a) for a in aliases)), "")
+    suffix_aliases = [a for a in aliases if a not in {"ip", "mac", "name", "type", "host"}]
+    return next(
+        (v for k, v in flat.items() if k not in IGNORE_KEYS and any(k.endswith(a) for a in suffix_aliases)),
+        "",
+    )
 
 
 def ci_get(data: dict[str, Any], wanted: str) -> Any:
