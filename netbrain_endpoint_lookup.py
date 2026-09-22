@@ -113,6 +113,25 @@ class NetBrain:
         if "Token" in self.headers:
             self.try_call("DELETE", SESSION)
 
+    def validate_connection(self) -> None:
+        last_error = None
+        for path in (SESSION, "/"):
+            url = urljoin(self.url + "/", path.lstrip("/"))
+            ctx = None if self.verify_tls else ssl._create_unverified_context()
+            req = Request(url, headers={"Accept": "application/json"}, method="GET")
+            try:
+                with urlopen(req, timeout=self.timeout, context=ctx) as resp:
+                    print(f"Conexion OK: NetBrain responde en {url} con HTTP {resp.status}.")
+                    return
+            except HTTPError as exc:
+                print(f"Conexion OK: NetBrain responde en {url} con HTTP {exc.code}.")
+                return
+            except URLError as exc:
+                last_error = exc
+                if self.verbose:
+                    print(f"[DEBUG] prueba de conexion fallo en {url}: {exc}", file=sys.stderr)
+        raise NetBrainError(f"No pude conectar a NetBrain en {self.url}. Detalle: {last_error}")
+
     def call(
         self,
         method: str,
@@ -178,8 +197,11 @@ def main() -> int:
     raw: list[dict[str, Any]] = []
 
     try:
-        print("Conectando a NetBrain...")
+        print("Validando conexion con NetBrain...")
+        nb.validate_connection()
+        print("Conectando a la API de NetBrain...")
         nb.login()
+        print("Login OK: token recibido.")
         select_domain(nb, args.tenant, args.domain)
         print(f"Buscando {len(targets)} endpoint(s)...")
         for target in targets:
@@ -194,6 +216,9 @@ def main() -> int:
     if args.raw_json:
         Path(args.raw_json).write_text(json.dumps(raw, indent=2, ensure_ascii=False), encoding="utf-8")
     print_table(rows, COLS[:10])
+    if rows and all(row["status"] == "not-found" for row in rows):
+        print("\n[WARN] La conexion/login fueron correctos, pero NetBrain no regreso switchport para esas IPs/MACs.")
+        print("[WARN] Prueba con --verbose --raw-json raw.json o confirma el endpoint exacto con --endpoint-path.")
     print(f"\nCSV generado: {output.resolve()}")
     return 0
 
