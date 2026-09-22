@@ -74,7 +74,7 @@ ALIASES = {
     "endpoint_mac": "mac macaddress mac_address endpointmac hostmac clientmac".split(),
     "endpoint_name": "endpoint endsystem host client clientname dns alias".split(),
     "switch_name": "switch switchname connecteddevice devicename device_name hostname name sourcedevice".split(),
-    "switch_ip": "switchip deviceip mgmtip managementip management_ip".split(),
+    "switch_ip": "switchip deviceip mgmtip managementip management_ip managementaddress".split(),
     "switch_port": "port portname interface interfacename intfname localinterface interfacename".split(),
     "port_description": "portdescription interfacedescription ifdescription intfdescription descr".split(),
     "vlan": "vlan vlanid accessvlan nativevlan".split(),
@@ -341,13 +341,33 @@ def lookup(
 
     direct_rows, direct_raw = connected_switch_port_lookup(nb, target)
     raw.extend(direct_raw)
-    if direct_rows:
-        return direct_rows, raw
-
     oneip_rows, oneip_raw = oneip_lookup(nb, target, scan=scan_oneip, count=oneip_count)
     raw.extend(oneip_raw)
-    if oneip_rows:
-        return oneip_rows, raw
+    if direct_rows or oneip_rows:
+        row = merge_rows(*(direct_rows + oneip_rows))
+        if row["switch_name"] and not row["switch_ip"]:
+            path = "/ServicesAPI/API/V1/CMDB/Devices"
+            result = nb.try_call("GET", path, params={"hostname": row["switch_name"], "fullattr": 1})
+            if result:
+                raw.append({"path": path, "params": {"hostname": row["switch_name"], "fullattr": 1}, "response": result})
+                devices = records_from(result)
+                device = next(
+                    (
+                        item
+                        for item in devices
+                        if clean(pick(
+                            {clean(k): stringify(v) for k, v in flatten(item).items()},
+                            ["hostname", "name"],
+                        )) == clean(row["switch_name"])
+                    ),
+                    None,
+                )
+                if device:
+                    device_flat = {clean(k): stringify(v) for k, v in flatten(device).items()}
+                    row["switch_ip"] = pick(device_flat, ["mgmtip", "managementip", "managementaddress", "deviceip"])
+                    for field, aliases in (("site", ["site", "sitepath"]), ("location", ["loc", "location"])):
+                        row[field] = row[field] or pick(device_flat, aliases)
+        return [row], raw
 
     keys = ["ip", "ipAddress", "endSystemIp", "endpointIp"] if target["type"] == "ip" else [
         "mac",
@@ -478,6 +498,21 @@ def useful_rows(target: dict[str, str], records: list[dict[str, Any]], source: s
     return [row for row in rows if has_real_endpoint_data(row, target)]
 
 
+def merge_rows(*rows: dict[str, str]) -> dict[str, str]:
+    merged = rows[0].copy()
+    sources = [merged["source_api"]] if merged["source_api"] else []
+    for row in rows[1:]:
+        for column in COLS:
+            if column not in {"notes", "source_api"} and not merged[column] and row.get(column):
+                merged[column] = row[column]
+        if row.get("source_api") and row["source_api"] not in sources:
+            sources.append(row["source_api"])
+        if row.get("notes") and row["notes"] not in merged["notes"]:
+            merged["notes"] = "; ".join(filter(None, (merged["notes"], row["notes"])))
+    merged["source_api"] = "; ".join(sources)
+    return merged
+
+
 def has_real_endpoint_data(row: dict[str, str], target: dict[str, str]) -> bool:
     useful_fields = [
         "endpoint_mac",
@@ -534,6 +569,8 @@ def row_from(target: dict[str, str], rec: dict[str, Any], status: str, source: s
     row["source_api"] = source
     for col, aliases in ALIASES.items():
         row[col] = pick(flat, aliases)
+    if row["endpoint_mac"] and MAC_RE.fullmatch(row["endpoint_mac"]):
+        row["endpoint_mac"] = norm_mac(row["endpoint_mac"])
     enrich_from_gui_text(row, " ".join(flat.values()))
     if target["type"] == "ip" and not row["endpoint_ip"]:
         row["endpoint_ip"] = target["value"]
