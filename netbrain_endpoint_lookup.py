@@ -72,7 +72,7 @@ COLS = [
 ALIASES = {
     "endpoint_ip": "ip ipaddress ip_address endpointip hostip clientip".split(),
     "endpoint_mac": "mac macaddress mac_address endpointmac hostmac clientmac".split(),
-    "endpoint_name": "endpoint endsystem host hostname name client clientname devname dns alias".split(),
+    "endpoint_name": "endpoint endsystem host client clientname dns alias".split(),
     "switch_name": "switch switchname connecteddevice devicename device_name hostname name sourcedevice".split(),
     "switch_ip": "switchip deviceip mgmtip managementip management_ip".split(),
     "switch_port": "port portname interface interfacename intfname localinterface interfacename".split(),
@@ -339,6 +339,11 @@ def lookup(
 ) -> tuple[list[dict[str, str]], list[dict[str, Any]]]:
     raw: list[dict[str, Any]] = []
 
+    direct_rows, direct_raw = connected_switch_port_lookup(nb, target)
+    raw.extend(direct_raw)
+    if direct_rows:
+        return direct_rows, raw
+
     oneip_rows, oneip_raw = oneip_lookup(nb, target, scan=scan_oneip, count=oneip_count)
     raw.extend(oneip_raw)
     if oneip_rows:
@@ -389,6 +394,22 @@ def lookup(
     return [empty_row(target, "not-found")], raw
 
 
+def connected_switch_port_lookup(
+    nb: NetBrain, target: dict[str, str]
+) -> tuple[list[dict[str, str]], list[dict[str, Any]]]:
+    if target["type"] != "ip":
+        return [], []
+
+    path = f"/ServicesAPI/API/V1/CMDB/Topology/Devices/{target['value']}/ConnectedSwitchPort"
+    result = nb.try_call("GET", path)
+    if not result:
+        return [], []
+
+    raw = [{"path": path, "response": result}]
+    rows = useful_rows(target, records_from(result), path)
+    return rows, raw
+
+
 def oneip_lookup(
     nb: NetBrain, target: dict[str, str], *, scan: bool, count: int
 ) -> tuple[list[dict[str, str]], list[dict[str, Any]]]:
@@ -406,7 +427,7 @@ def oneip_lookup(
 
     for path in paths:
         for key in query_keys:
-            params = {key: target["value"], "beginIndex": 0, "Count": count}
+            params = {key: target["value"], "beginIndex": 0, "count": count}
             result = nb.try_call("GET", path, params=params)
             records = filter_target_records(records_from(result), target) if result else []
             if result:
@@ -423,7 +444,7 @@ def oneip_lookup(
     for path in paths:
         begin = 0
         while True:
-            params = {"beginIndex": begin, "Count": count}
+            params = {"beginIndex": begin, "count": count}
             result = nb.try_call("GET", path, params=params)
             records = records_from(result) if result else []
             if result:
@@ -486,7 +507,7 @@ def records_from(data: Any) -> list[dict[str, Any]]:
     if not isinstance(data, dict):
         return []
     for key in (
-        "oneIPTable oneIpTable oneiptable oneIPTables oneIpTables oneIpTableList "
+        "OneIPList oneIPList oneIpList oneIPTable oneIpTable oneiptable oneIPTables oneIpTables oneIpTableList "
         "ipTable iptable ipTables ipList table list records rows "
         "connectedSwitchPorts connectedSwitchPort switchPorts switchPort ports "
         "interfaces results data items devices"
