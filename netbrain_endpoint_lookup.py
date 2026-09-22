@@ -27,6 +27,8 @@ from urllib.request import Request, urlopen
 SESSION = "/ServicesAPI/API/V1/Session"
 DEFAULT_OUTPUT = "netbrain_endpoint_report.csv"
 DEFAULT_ENDPOINTS = [
+    "/ServicesAPI/API/V1/CMDB/IP/OneIPTable",
+    "/ServicesAPI/API/V1/CMDB/Topology/OneIPTable",
     "/ServicesAPI/API/V1/CMDB/Devices/ConnectedSwitchPorts",
     "/ServicesAPI/API/V1/CMDB/Devices/EndSystemConnectedSwitchPorts",
     "/ServicesAPI/API/V1/CMDB/Devices/EndSystem/ConnectedSwitchPorts",
@@ -34,9 +36,12 @@ DEFAULT_ENDPOINTS = [
     "/ServicesAPI/API/V1/Topology/ConnectedSwitchPort",
 ]
 SEARCH_ENDPOINTS = [
+    "/ServicesAPI/API/V1/Search/Results",
+    "/ServicesAPI/API/V1/Search/Result",
     "/ServicesAPI/API/V1/CMDB/Search",
     "/ServicesAPI/API/V1/Search",
     "/ServicesAPI/API/V1/CMDB/Search/Results",
+    "/ServicesAPI/API/V1/CMDB/Search/Result",
 ]
 MAC_RE = re.compile(
     r"(?i)\b(?:[0-9a-f]{2}[:-]){5}[0-9a-f]{2}\b|"
@@ -69,12 +74,12 @@ COLS = [
 ALIASES = {
     "endpoint_ip": "ip ipaddress ip_address endpointip hostip clientip".split(),
     "endpoint_mac": "mac macaddress mac_address endpointmac hostmac clientmac".split(),
-    "endpoint_name": "endpoint endsystem host hostname name client clientname".split(),
-    "switch_name": "switch switchname connecteddevice devicename device_name hostname name".split(),
+    "endpoint_name": "endpoint endsystem host hostname name client clientname devname dns alias".split(),
+    "switch_name": "switch switchname connecteddevice devicename device_name hostname name sourcedevice".split(),
     "switch_ip": "switchip deviceip mgmtip managementip management_ip".split(),
-    "switch_port": "port portname interface interfacename intfname localinterface".split(),
+    "switch_port": "port portname interface interfacename intfname localinterface interfacename".split(),
     "port_description": "description descr portdescription interfacedescription".split(),
-    "vlan": "vlan accessvlan nativevlan".split(),
+    "vlan": "vlan vlanid accessvlan nativevlan".split(),
     "vrf": "vrf vrfname".split(),
     "site": "site sitepath".split(),
     "location": "location loc rack room".split(),
@@ -205,7 +210,13 @@ def main() -> int:
         select_domain(nb, args.tenant, args.domain)
         print(f"Buscando {len(targets)} endpoint(s)...")
         for target in targets:
-            target_rows, target_raw = lookup(nb, target, args.endpoint_path or DEFAULT_ENDPOINTS)
+            target_rows, target_raw = lookup(
+                nb,
+                target,
+                args.endpoint_path or DEFAULT_ENDPOINTS,
+                scan_oneip=args.oneip_scan,
+                oneip_count=args.oneip_count,
+            )
             rows.extend(target_rows)
             raw.append({"target": target["value"], "responses": target_raw})
     finally:
@@ -235,6 +246,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--output", default=DEFAULT_OUTPUT, help="CSV de salida")
     p.add_argument("--raw-json", help="Guardar respuestas crudas")
     p.add_argument("--endpoint-path", action="append", help="Endpoint exacto de switchport")
+    p.add_argument("--oneip-scan", action="store_true", help="Escanea One-IP Table si el filtro por IP/MAC no devuelve datos")
+    p.add_argument("--oneip-count", type=int, default=10000, help="Registros por pagina al usar --oneip-scan")
     p.add_argument("--insecure", action="store_true", help="No validar TLS")
     p.add_argument("--timeout", type=int, default=30)
     p.add_argument("--verbose", action="store_true")
@@ -291,7 +304,7 @@ def load_targets(path: Path) -> list[dict[str, str]]:
     seen: set[tuple[str, str]] = set()
 
     for line in path.read_text(encoding="utf-8-sig").splitlines():
-        line = re.split(r"#|//", line, 1)[0]
+        line = re.split(r"#|//", line, maxsplit=1)[0]
         for mac in MAC_RE.findall(line):
             add_target(targets, seen, "mac", norm_mac(mac))
             line = line.replace(mac, " ")
@@ -316,8 +329,21 @@ def norm_mac(mac: str) -> str:
     return ":".join(digits[i : i + 2] for i in range(0, 12, 2))
 
 
-def lookup(nb: NetBrain, target: dict[str, str], endpoints: list[str]) -> tuple[list[dict[str, str]], list[dict[str, Any]]]:
+def lookup(
+    nb: NetBrain,
+    target: dict[str, str],
+    endpoints: list[str],
+    *,
+    scan_oneip: bool = False,
+    oneip_count: int = 10000,
+) -> tuple[list[dict[str, str]], list[dict[str, Any]]]:
     raw: list[dict[str, Any]] = []
+
+    oneip_rows, oneip_raw = oneip_lookup(nb, target, scan=scan_oneip, count=oneip_count)
+    raw.extend(oneip_raw)
+    if oneip_rows:
+        return oneip_rows, raw
+
     keys = ["ip", "ipAddress", "endSystemIp", "endpointIp"] if target["type"] == "ip" else [
         "mac",
         "macAddress",
@@ -346,13 +372,75 @@ def lookup(nb: NetBrain, target: dict[str, str], endpoints: list[str]) -> tuple[
             return [row], raw + [{"path": "/ServicesAPI/API/V1/CMDB/Devices", "response": device}]
 
     for path in SEARCH_ENDPOINTS:
-        for key in ("keyword", "searchText", "q", "query"):
-            result = nb.try_call("GET", path, params={key: target["value"]})
-            records = records_from(result) if result else []
+        for key in ("keyword", "searchText", "searchString", "q", "query", "text"):
+            payload = {key: target["value"], "limit": 20, "skip": 0}
+            for method, kwargs in (("GET", {"params": payload}), ("POST", {"body": payload})):
+                result = nb.try_call(method, path, **kwargs)
+                records = filter_target_records(records_from(result), target) if result else []
+                if result:
+                    raw.append({"method": method, "path": path, "key": key, "response": result})
+                if records:
+                    return [row_from(target, rec, "found", path) for rec in records], raw
+
+    return [empty_row(target, "not-found")], raw
+
+
+def oneip_lookup(
+    nb: NetBrain, target: dict[str, str], *, scan: bool, count: int
+) -> tuple[list[dict[str, str]], list[dict[str, Any]]]:
+    paths = [
+        "/ServicesAPI/API/V1/CMDB/IP/OneIPTable",
+        "/ServicesAPI/API/V1/CMDB/Topology/OneIPTable",
+    ]
+    query_keys = ["ip", "IP", "ipAddress", "IP Address"] if target["type"] == "ip" else [
+        "mac",
+        "MAC",
+        "macAddress",
+        "MAC Address",
+    ]
+    raw: list[dict[str, Any]] = []
+
+    for path in paths:
+        for key in query_keys:
+            params = {key: target["value"], "beginIndex": 0, "Count": count}
+            result = nb.try_call("GET", path, params=params)
+            records = filter_target_records(records_from(result), target) if result else []
+            if result:
+                raw.append({"path": path, "params": params, "response": result})
             if records:
                 return [row_from(target, rec, "found", path) for rec in records], raw
 
-    return [empty_row(target, "not-found")], raw
+    if not scan:
+        return [], raw
+
+    for path in paths:
+        begin = 0
+        while True:
+            params = {"beginIndex": begin, "Count": count}
+            result = nb.try_call("GET", path, params=params)
+            records = records_from(result) if result else []
+            if result:
+                raw.append({"path": path, "params": params, "record_count": len(records)})
+            matches = filter_target_records(records, target)
+            if matches:
+                return [row_from(target, rec, "found", path) for rec in matches], raw
+            if len(records) < count:
+                break
+            begin += count
+    return [], raw
+
+
+def filter_target_records(records: list[dict[str, Any]], target: dict[str, str]) -> list[dict[str, Any]]:
+    wanted = clean(target["value"])
+    matches = []
+    for record in records:
+        flat = {clean(k): clean(stringify(v)) for k, v in flatten(record).items()}
+        values = set(flat.values())
+        if target["type"] == "mac":
+            values |= {clean(norm_mac(v)) for v in flat.values() if len(re.sub(r"[^0-9a-fA-F]", "", v)) == 12}
+        if wanted in values or any(wanted in value for value in values):
+            matches.append(record)
+    return matches
 
 
 def records_from(data: Any) -> list[dict[str, Any]]:
@@ -360,13 +448,18 @@ def records_from(data: Any) -> list[dict[str, Any]]:
         return [x for x in data if isinstance(x, dict)]
     if not isinstance(data, dict):
         return []
-    for key in "connectedSwitchPorts connectedSwitchPort switchPorts switchPort ports interfaces results data items devices".split():
+    for key in (
+        "oneIPTable oneIpTable oneiptable ipTable iptable ipTables records rows "
+        "connectedSwitchPorts connectedSwitchPort switchPorts switchPort ports "
+        "interfaces results data items devices"
+    ).split():
         value = ci_get(data, key)
         if isinstance(value, list):
             return [x for x in value if isinstance(x, dict)]
         if isinstance(value, dict):
             return records_from(value) or [value]
-    if set(data) <= {"statusCode", "statusDescription"}:
+    metadata = {"statuscode", "statusdescription", "totalresultcount", "total", "count"}
+    if all(clean(k) in metadata for k in data):
         return []
     return [data]
 
@@ -377,12 +470,31 @@ def row_from(target: dict[str, str], rec: dict[str, Any], status: str, source: s
     row["source_api"] = source
     for col, aliases in ALIASES.items():
         row[col] = pick(flat, aliases)
+    enrich_from_gui_text(row, " ".join(flat.values()))
     if target["type"] == "ip" and not row["endpoint_ip"]:
         row["endpoint_ip"] = target["value"]
     if target["type"] == "mac" and not row["endpoint_mac"]:
         row["endpoint_mac"] = target["value"]
     row["notes"] = row["notes"] or "; ".join(f"{k}={v[:60]}" for k, v in list(flat.items())[:4] if v)
     return row
+
+
+def enrich_from_gui_text(row: dict[str, str], text: str) -> None:
+    mac = re.search(r"MAC Address:\s*([0-9a-fA-F.:-]{12,17})", text, re.I)
+    ip = re.search(r"IP Address:\s*([0-9a-fA-F:.]+)", text, re.I)
+    port = re.search(r"Connected Switch Port:\s*([^\s,;]+)", text, re.I)
+    if mac and not row["endpoint_mac"]:
+        row["endpoint_mac"] = norm_mac(mac.group(1))
+    if ip and not row["endpoint_ip"]:
+        row["endpoint_ip"] = ip.group(1)
+    if port:
+        value = port.group(1)
+        if "." in value:
+            switch, intf = value.rsplit(".", 1)
+            row["switch_name"] = row["switch_name"] or switch
+            row["switch_port"] = row["switch_port"] or intf
+        else:
+            row["switch_port"] = row["switch_port"] or value
 
 
 def empty_row(target: dict[str, str], status: str) -> dict[str, str]:
