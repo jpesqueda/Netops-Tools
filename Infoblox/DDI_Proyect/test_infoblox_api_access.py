@@ -17,6 +17,7 @@ import getpass
 import os
 import sys
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 from packaging.version import InvalidVersion, Version
@@ -47,6 +48,16 @@ def latest_version(versions: list[str]) -> str | None:
     if not parsed:
         return None
     return max(parsed, key=lambda item: item[0])[1]
+
+
+def normalize_base_url(url: str) -> tuple[str, str | None]:
+    """Normalize an Infoblox UI URL to the WAPI base origin."""
+
+    parsed = urlsplit(url.rstrip("/"))
+    base_url = urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
+    if parsed.path and parsed.path != "/":
+        return base_url, f"Removed URL path '{parsed.path}'. WAPI is normally served from {base_url}/wapi/."
+    return base_url, None
 
 
 def discover_wapi_version(client: httpx.Client, base_url: str, configured_version: str) -> str:
@@ -86,11 +97,13 @@ def main() -> int:
         print("[FAIL] Missing Infoblox password.")
         return 5
 
-    base_url = args.url.rstrip("/")
+    base_url, normalization_warning = normalize_base_url(args.url)
     verify_tls = not args.insecure
 
     if args.insecure:
         print("WARNING: TLS certificate validation is disabled.")
+    if normalization_warning:
+        print(f"WARNING: {normalization_warning}")
 
     print("INFOBLOX API ACCESS TEST")
     print(f"URL              : {base_url}")
@@ -132,6 +145,10 @@ def main() -> int:
         if status in {401, 403}:
             print("[FAIL] Authentication failed or API permissions are insufficient.")
             return 2
+        if status == 404:
+            print("[FAIL] Infoblox WAPI returned HTTP 404.")
+            print("Hint: use the Infoblox host URL, not the UI path. Example: https://infoblox.example.com")
+            return 1
         print(f"[FAIL] Infoblox WAPI returned HTTP {status}.")
         print(exc.response.text[:500])
         return 1
