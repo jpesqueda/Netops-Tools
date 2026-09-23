@@ -12,7 +12,7 @@ Author:
     Peskicorp
 
 Version:
-    2.0.1
+    2.0.2
 
 Requirements:
     Python 3.10+
@@ -50,7 +50,7 @@ except ImportError:
 
 SESSION = "/ServicesAPI/API/V1/Session"
 DEFAULT_OUTPUT = "netbrain_endpoint_report.csv"
-VERSION = "NetBrain Endpoint Lookup 2.0.1"
+VERSION = "NetBrain Endpoint Lookup 2.0.2"
 console = Console(markup=False) if Console else None
 DEFAULT_ENDPOINTS = [
     "/ServicesAPI/API/V1/CMDB/Devices/ConnectedSwitchPorts",
@@ -298,6 +298,9 @@ def main() -> int:
                     scan_oneip=args.oneip_scan or not args.no_oneip_scan,
                     oneip_count=args.oneip_count,
                 )
+                for result_row in target_rows:
+                    if result_row["status"] == "not-found" and result_row.get("notes"):
+                        say(f"[WARN] {target['value']}: {result_row['notes']}", style="yellow")
                 rows.extend(target_rows)
                 raw.append({"target": target["value"], "responses": target_raw})
                 if args.verbose:
@@ -370,7 +373,7 @@ EXAMPLES
     advanced.add_argument("--endpoint-path", action="append", help="Additional switch-port endpoint to try")
     advanced.add_argument("--oneip-scan", action="store_true", help="Compatibility option; One-IP scan is enabled by default")
     advanced.add_argument("--no-oneip-scan", action="store_true", help="Disable full One-IP Table scan fallback")
-    advanced.add_argument("--oneip-count", type=int, default=10000, help="Rows per One-IP Table page (default: 10000)")
+    advanced.add_argument("--oneip-count", type=int, default=1000, help="Rows per One-IP Table page (max: 1000)")
     advanced.add_argument("--timeout", type=int, default=30, help="HTTP timeout in seconds (default: 30)")
     advanced.add_argument("-v", "--verbose", action="store_true", help="Show target and request diagnostics; secrets are omitted")
     return p.parse_args()
@@ -515,7 +518,7 @@ def lookup(
     endpoints: list[str],
     *,
     scan_oneip: bool = False,
-    oneip_count: int = 10000,
+    oneip_count: int = 1000,
 ) -> tuple[list[dict[str, str]], list[dict[str, Any]]]:
     raw: list[dict[str, Any]] = []
 
@@ -591,7 +594,11 @@ def lookup(
                     if rows:
                         return rows, raw
 
-    return [empty_row(target, "not-found")], raw
+    row = empty_row(target, "not-found")
+    errors = list(dict.fromkeys(item["api_error"] for item in raw if item.get("api_error")))
+    if errors:
+        row["notes"] = "One-IP API: " + "; ".join(errors)
+    return [row], raw
 
 
 def connected_switch_port_lookup(
@@ -616,7 +623,7 @@ def oneip_lookup(
     path = "/ServicesAPI/API/V1/CMDB/Topology/OneIPTable"
     query_key = "ip" if target["type"] == "IP" else "mac"
     query_values = [target["value"]] if target["type"] == "IP" else mac_query_values(target["value"])
-    page_size = max(1, min(count, 10000))
+    page_size = max(1, min(count, 1000))
     raw: list[dict[str, Any]] = []
 
     for value in query_values:
@@ -625,9 +632,14 @@ def oneip_lookup(
         candidates = records_from(result) if result else []
         records = filter_target_records(candidates, target)
         if result:
-            raw.append({"path": path, "params": params, "response": result})
+            entry = {"path": path, "params": params, "response": result}
+            if error := api_status_error(result):
+                entry["api_error"] = error
+            raw.append(entry)
         if nb.verbose:
-            debug(f"One-IP query ({query_key}={value}): {len(candidates)} record(s), {len(records)} MAC/IP match(es)")
+            error = api_status_error(result) if result else ""
+            detail = f"; {error}" if error else ""
+            debug(f"One-IP query ({query_key}={value}): {len(candidates)} record(s), {len(records)} match(es){detail}")
         if records:
             rows = useful_rows(target, records, path)
             if rows:
@@ -639,11 +651,16 @@ def oneip_lookup(
     begin = 0
     seen_pages: set[str] = set()
     while True:
-        params = {"beginIndex": begin, "count": page_size}
+        params = {"ip": "", "beginIndex": begin, "count": page_size}
         result = nb.try_call("GET", path, params=params)
         records = records_from(result) if result else []
         if result:
-            raw.append({"path": path, "params": params, "record_count": len(records)})
+            entry = {"path": path, "params": params, "record_count": len(records)}
+            if error := api_status_error(result):
+                entry["api_error"] = error
+            raw.append(entry)
+            if nb.verbose and (error := api_status_error(result)):
+                debug(f"One-IP page {begin}: {error}")
         if not records:
             break
         signature = json.dumps(records, sort_keys=True, ensure_ascii=False)
@@ -855,6 +872,16 @@ def pick(flat: dict[str, str], aliases: list[str]) -> str:
 
 def ci_get(data: dict[str, Any], wanted: str) -> Any:
     return next((v for k, v in data.items() if str(k).casefold() == wanted.casefold()), None)
+
+
+def api_status_error(data: Any) -> str:
+    if not isinstance(data, dict):
+        return ""
+    code = ci_get(data, "statusCode")
+    if code is None or str(code) in {"0", "200", "790200"}:
+        return ""
+    description = ci_get(data, "statusDescription") or "Unknown NetBrain API error"
+    return f"statusCode={code}: {description}"
 
 
 def stringify(value: Any) -> str:
