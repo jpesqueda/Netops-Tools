@@ -172,10 +172,10 @@ class NetBrain:
             req = Request(url, headers={"Accept": "application/json"}, method="GET")
             try:
                 with urlopen(req, timeout=self.timeout, context=ctx) as resp:
-                    say(f"    Status : Reachable (HTTP {resp.status})")
+                    say(f"    Status : Reachable (HTTP {resp.status})", style="green")
                     return
             except HTTPError as exc:
-                say(f"    Status : Reachable (HTTP {exc.code})")
+                say(f"    Status : Reachable (HTTP {exc.code})", style="green")
                 return
             except URLError as exc:
                 last_error = exc
@@ -237,7 +237,7 @@ def main() -> int:
     args = parse_args()
     show_banner()
     if args.insecure:
-        say("[!] WARNING: SSL certificate verification is disabled.")
+        say("[!] WARNING: SSL certificate verification is disabled.", style="yellow")
 
     if args.host is not None:
         target = make_target(args.host.strip())
@@ -270,20 +270,21 @@ def main() -> int:
         password = args.password if args.password is not None else getpass.getpass("NetBrain Password: ")
         nb = NetBrain(url, user, password, args)
         try:
-            say("[+] Validating NetBrain connectivity...")
-            say(f"    URL    : {url}")
+            say("[+] Validating NetBrain connectivity...", style="green")
+            say(f"    URL    : {url}", style="green")
             nb.validate_connection()
-            say("[+] Connecting to NetBrain API...")
+            say("[+] Connecting to NetBrain API...", style="green")
             nb.login()
-            say("    Login  : Successful")
-            say("    Token  : Received")
+            say("    Login  : Successful", style="green")
+            say("    Token  : Received", style="green")
             select_domain(nb, args.tenant, args.domain)
-            say(f"[+] Searching {len(valid_targets)} endpoint(s)...")
+            say(f"[+] Searching {len(valid_targets)} endpoint(s)...", style="green")
             for target in targets:
                 if target["type"] == "INVALID":
                     rows.append(invalid_row(target))
                     continue
-                debug(f"Searching endpoint: {target['value']}")
+                if args.verbose:
+                    debug(f"Searching endpoint: {target['value']}")
                 target_rows, target_raw = lookup(
                     nb,
                     target,
@@ -293,21 +294,23 @@ def main() -> int:
                 )
                 rows.extend(target_rows)
                 raw.append({"target": target["value"], "responses": target_raw})
-                debug("Endpoint lookup completed")
+                if args.verbose:
+                    debug("Endpoint lookup completed")
         finally:
             nb.logout()
     else:
         rows.extend(invalid_row(target) for target in targets)
 
+    rows = [{column: row.get(column) or "N/A" for column in COLS} for row in rows]
     output = Path(args.output or DEFAULT_OUTPUT)
     write_csv(output, rows)
     if args.raw_json:
         Path(args.raw_json).write_text(json.dumps(raw, indent=2, ensure_ascii=False), encoding="utf-8")
     display_results(rows)
     found = sum(row["status"] == "found" for row in rows)
-    say("[+] Lookup completed successfully.")
-    say(f"[+] Endpoints found : {found}")
-    say(f"[+] CSV report      : {output.resolve()}")
+    say("[+] Lookup completed successfully.", style="green")
+    say(f"[+] Endpoints found : {found}", style="green")
+    say(f"[+] CSV report      : {output.resolve()}", style="green")
     return 0
 
 
@@ -384,7 +387,7 @@ def select_domain(nb: NetBrain, tenant_arg: str | None, domain_arg: str | None) 
         "/ServicesAPI/API/V1/Session/CurrentDomain",
         body={"tenantId": tenant["tenantId"], "domainId": domain["domainId"]},
     )
-    say(f"    Domain : {tenant.get('tenantName')} / {domain.get('domainName')}")
+    say(f"    Domain : {tenant.get('tenantName')} / {domain.get('domainName')}", style="green")
 
 
 def choose(items: list[dict[str, Any]], wanted: str | None, name: str, item_id: str, label: str) -> dict[str, Any] | None:
@@ -619,7 +622,7 @@ def oneip_lookup(
     if not scan:
         return [], raw
 
-    say(f"    Scanning One-IP Table for {target['value']}...")
+    say(f"    Scanning One-IP Table for {target['value']}...", style="green")
     for path in paths:
         begin = 0
         while True:
@@ -809,10 +812,10 @@ def write_csv(path: Path, rows: list[dict[str, str]]) -> None:
         writer.writerows(rows)
 
 
-def say(message: str, *, error: bool = False) -> None:
+def say(message: str, *, error: bool = False, style: str | None = None) -> None:
     """Print plain operational text through Rich when it is installed."""
     if console and not error:
-        console.print(message)
+        console.print(Text(message, style=style) if style and Text else message)
     else:
         print(message, file=sys.stderr if error else sys.stdout)
 
@@ -823,7 +826,8 @@ def debug(message: str) -> None:
 
 def show_banner() -> None:
     if console and Panel:
-        console.print(Panel("NETBRAIN ENDPOINT LOOKUP", box=box.ROUNDED, expand=False))
+        title = Text("NETBRAIN ENDPOINT LOOKUP", style="green") if Text else "NETBRAIN ENDPOINT LOOKUP"
+        console.print(Panel(title, box=box.ROUNDED, border_style="green", expand=False))
     else:
         say("NETBRAIN ENDPOINT LOOKUP")
 
@@ -841,9 +845,9 @@ def display_results(rows: list[dict[str, str]]) -> None:
         ("Interface", "switch_port"),
         ("Port Description", "port_description"),
     ]
-    say("\nNetBrain Endpoint Results")
+    say("\nNetBrain Endpoint Results", style="green")
     if console and Table and Text:
-        table = Table(box=box.SQUARE, show_lines=False, expand=True)
+        table = Table(box=box.SQUARE, show_lines=False, expand=True, border_style="green", header_style="green")
         for heading, _ in columns:
             table.add_column(heading, no_wrap=True, overflow="ellipsis")
         for row in rows:
