@@ -12,7 +12,7 @@ Author:
     Peskicorp
 
 Version:
-    2.0.4
+    2.0.5
 
 Requirements:
     Python 3.10+
@@ -50,7 +50,7 @@ except ImportError:
 
 SESSION = "/ServicesAPI/API/V1/Session"
 DEFAULT_OUTPUT = "netbrain_endpoint_report.csv"
-VERSION = "NetBrain Endpoint Lookup 2.0.4"
+VERSION = "NetBrain Endpoint Lookup 2.0.5"
 console = Console(markup=False) if Console else None
 DEFAULT_ENDPOINTS = [
     "/ServicesAPI/API/V1/CMDB/Devices/ConnectedSwitchPorts",
@@ -687,6 +687,8 @@ def oneip_lookup(
 
     begin = 0
     seen_pages: set[str] = set()
+    last_record: dict[str, Any] | None = None
+    last_page: Any = None
     while True:
         params = {"ip": "", "beginIndex": begin, "count": page_size}
         result = nb.try_call("GET", path, params=params)
@@ -710,6 +712,30 @@ def oneip_lookup(
                 samples = mac_samples(records)
                 debug(f"One-IP first-page MAC samples: {', '.join(samples) or 'no MAC fields detected'}")
         if not records:
+            error_text = str(nb.last_error or "")
+            if "afterid" in error_text.casefold():
+                cursor, cursor_field, available_fields = after_id_cursor(
+                    last_page, [last_record] if last_record else []
+                )
+                if cursor:
+                    for entry in reversed(raw):
+                        if entry.get("params") == params and entry.get("api_error"):
+                            entry["pagination_warning"] = entry.pop("api_error")
+                            break
+                    if nb.verbose:
+                        debug(f"Offset limit reached at {begin}; resuming One-IP scan with afterId ({cursor_field}).")
+                    return scan_oneip_after_id(nb, target, path, page_size, raw, cursor)
+                fields = ", ".join(available_fields) or "none"
+                raw.append(
+                    {
+                        "path": path,
+                        "params": params,
+                        "lookup_error": (
+                            "NetBrain requires afterId cursor paging beyond this offset, but no row ID/cursor "
+                            f"was found in the previous page (fields: {fields})."
+                        ),
+                    }
+                )
             break
         signature = json.dumps(records, sort_keys=True, ensure_ascii=False)
         if signature in seen_pages:
@@ -726,8 +752,122 @@ def oneip_lookup(
             rows = useful_rows(target, matches, path)
             if rows:
                 return rows, raw
+        last_record = records[-1]
+        last_page = result
         begin += len(records)
     return [], raw
+
+
+def scan_oneip_after_id(
+    nb: NetBrain,
+    target: dict[str, str],
+    path: str,
+    page_size: int,
+    raw: list[dict[str, Any]],
+    cursor: str,
+) -> tuple[list[dict[str, str]], list[dict[str, Any]]]:
+    seen_cursors = {cursor}
+    seen_pages: set[str] = set()
+    while True:
+        params = {"ip": "", "afterId": cursor, "count": page_size}
+        result = nb.try_call("GET", path, params=params)
+        if not result:
+            if nb.last_error:
+                raw.append({"path": path, "params": params, "api_error": str(nb.last_error)})
+            break
+
+        records = records_from(result)
+        matches = filter_target_records(records, target)
+        entry = {"path": path, "params": params, "record_count": len(records), "pagination": "afterId"}
+        if error := api_status_error(result):
+            entry["api_error"] = error
+        raw.append(entry)
+        if nb.verbose:
+            status = ci_get(result, "statusCode") if isinstance(result, dict) else "unavailable"
+            description = ci_get(result, "statusDescription") if isinstance(result, dict) else ""
+            debug(
+                f"One-IP cursor scan: rows={len(records)}, matches={len(matches)}, statusCode={status}, "
+                f"description={description or 'N/A'}"
+            )
+        if not records:
+            break
+
+        signature = json.dumps(records, sort_keys=True, ensure_ascii=False)
+        if signature in seen_pages:
+            raw.append(
+                {
+                    "path": path,
+                    "params": params,
+                    "lookup_error": "NetBrain repeated an afterId page; the cursor did not advance safely.",
+                }
+            )
+            break
+        seen_pages.add(signature)
+        if matches:
+            rows = useful_rows(target, matches, path)
+            if rows:
+                return rows, raw
+        if len(records) < page_size:
+            break
+
+        next_cursor, cursor_field, fields = after_id_cursor(result, records)
+        if not next_cursor:
+            raw.append(
+                {
+                    "path": path,
+                    "params": params,
+                    "lookup_error": (
+                        "NetBrain returned a full afterId page without a next cursor/row ID "
+                        f"(fields: {', '.join(fields) or 'none'})."
+                    ),
+                }
+            )
+            break
+        if next_cursor in seen_cursors:
+            raw.append(
+                {
+                    "path": path,
+                    "params": params,
+                    "lookup_error": f"NetBrain afterId cursor did not advance (field: {cursor_field}).",
+                }
+            )
+            break
+        seen_cursors.add(next_cursor)
+        cursor = next_cursor
+    return [], raw
+
+
+def after_id_cursor(
+    response: Any, records: list[dict[str, Any]]
+) -> tuple[str, str, list[str]]:
+    """Extract a cursor from common NetBrain response metadata or the last row."""
+    if isinstance(response, dict):
+        for key, value in response.items():
+            normalized = re.sub(r"[^a-z0-9]", "", str(key).casefold())
+            if normalized in {"nextafterid", "nextid", "lastid", "nextcursor", "cursor"}:
+                if isinstance(value, (str, int)) and not isinstance(value, bool) and str(value).strip():
+                    return str(value).strip(), str(key), list(response)
+
+    row = records[-1] if records else {}
+    fields = list(flatten(row))
+    cursor_names = {
+        "afterid",
+        "oneipentryid",
+        "oneiprecordid",
+        "oneipid",
+        "recordid",
+        "rowid",
+        "entryid",
+        "itemid",
+        "objectid",
+        "id",
+    }
+    for key, value in row.items():
+        normalized = re.sub(r"[^a-z0-9]", "", str(key).casefold())
+        if normalized in cursor_names and isinstance(value, (str, int)) and not isinstance(value, bool):
+            if str(value).strip():
+                return str(value).strip(), str(key), fields
+    return "", "", fields
 
 
 def filter_target_records(records: list[dict[str, Any]], target: dict[str, str]) -> list[dict[str, Any]]:
