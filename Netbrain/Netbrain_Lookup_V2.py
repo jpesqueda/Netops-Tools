@@ -12,7 +12,7 @@ Author:
     Peskicorp
 
 Version:
-    1.0.0
+    2.0.1
 
 Requirements:
     Python 3.10+
@@ -50,7 +50,7 @@ except ImportError:
 
 SESSION = "/ServicesAPI/API/V1/Session"
 DEFAULT_OUTPUT = "netbrain_endpoint_report.csv"
-VERSION = "NetBrain Endpoint Lookup 1.0.0"
+VERSION = "NetBrain Endpoint Lookup 2.0.1"
 console = Console(markup=False) if Console else None
 DEFAULT_ENDPOINTS = [
     "/ServicesAPI/API/V1/CMDB/Devices/ConnectedSwitchPorts",
@@ -240,6 +240,8 @@ class NetBrain:
 def main() -> int:
     args = parse_args()
     show_banner()
+    if args.verbose:
+        debug(f"Script file: {Path(__file__).resolve()}")
     if args.insecure:
         say("[!] WARNING: SSL certificate verification is disabled.", style="yellow")
 
@@ -305,6 +307,7 @@ def main() -> int:
     else:
         rows.extend(invalid_row(target) for target in targets)
 
+    correlate_mac_targets(rows)
     rows = [{column: row.get(column) or "N/A" for column in COLS} for row in rows]
     output = Path(args.output or DEFAULT_OUTPUT)
     write_csv(output, rows)
@@ -694,6 +697,33 @@ def merge_rows(*rows: dict[str, str]) -> dict[str, str]:
             merged["notes"] = "; ".join(filter(None, (merged["notes"], row["notes"])))
     merged["source_api"] = "; ".join(sources)
     return merged
+
+
+def correlate_mac_targets(rows: list[dict[str, str]]) -> None:
+    """Reuse verified IP lookup rows to resolve matching MAC targets in the same input."""
+    by_mac: dict[str, dict[str, str]] = {}
+    for row in rows:
+        if row.get("status") != "found" or row.get("target_type") != "IP":
+            continue
+        mac = row.get("endpoint_mac", "")
+        if mac:
+            try:
+                by_mac.setdefault(normalize_mac(mac), row)
+            except ValueError:
+                continue
+
+    for row in rows:
+        if row.get("target_type") != "MAC" or row.get("status") == "found":
+            continue
+        match = by_mac.get(normalize_mac(row["target"]))
+        if not match:
+            continue
+        resolved = merge_rows(match, row)
+        resolved.update({"target": row["target"], "target_type": "MAC", "status": "found"})
+        resolved["endpoint_mac"] = normalize_mac(row["target"])
+        note = "MAC correlacionada con un resultado IP del mismo archivo"
+        resolved["notes"] = "; ".join(filter(None, (resolved["notes"], note)))
+        row.update(resolved)
 
 
 def has_real_endpoint_data(row: dict[str, str], target: dict[str, str]) -> bool:
