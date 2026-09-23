@@ -12,7 +12,7 @@ Author:
     Peskicorp
 
 Version:
-    2.0.3
+    2.0.4
 
 Requirements:
     Python 3.10+
@@ -50,7 +50,7 @@ except ImportError:
 
 SESSION = "/ServicesAPI/API/V1/Session"
 DEFAULT_OUTPUT = "netbrain_endpoint_report.csv"
-VERSION = "NetBrain Endpoint Lookup 2.0.3"
+VERSION = "NetBrain Endpoint Lookup 2.0.4"
 console = Console(markup=False) if Console else None
 DEFAULT_ENDPOINTS = [
     "/ServicesAPI/API/V1/CMDB/Devices/ConnectedSwitchPorts",
@@ -148,6 +148,7 @@ class NetBrain:
         self.verify_tls = not args.insecure
         self.verbose = args.verbose
         self.headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        self.last_error: Exception | None = None
 
     def login(self) -> None:
         body = {"username": self.user, "password": self.password}
@@ -214,26 +215,45 @@ class NetBrain:
                 text = resp.read().decode("utf-8", errors="replace")
         except HTTPError as exc:
             code = exc.code
-            exc.read()
-            text = ""
+            text = exc.read().decode("utf-8", errors="replace")
         except URLError as exc:
             raise NetBrainUnreachable("Unable to reach NetBrain server.") from exc
 
         if self.verbose:
             debug(f"HTTP status: {code}")
         if code != 200:
-            raise NetBrainAPIError(f"NetBrain API request failed: HTTP {code} at {path}", code)
+            detail = ""
+            if text.strip():
+                try:
+                    payload = json.loads(text)
+                    if isinstance(payload, dict):
+                        detail = next(
+                            (
+                                str(value)
+                                for key, value in payload.items()
+                                if str(key).casefold() in {"statusdescription", "message", "error", "detail"}
+                                and value
+                            ),
+                            "",
+                        )
+                except json.JSONDecodeError:
+                    pass
+                detail = detail or " ".join(text.split())
+            suffix = f": {detail[:500]}" if detail else ""
+            raise NetBrainAPIError(f"NetBrain API request failed: HTTP {code} at {path}{suffix}", code)
         try:
             return json.loads(text) if text.strip() else {}
         except json.JSONDecodeError as exc:
             raise NetBrainAPIError(f"NetBrain API returned invalid JSON: {path}") from exc
 
     def try_call(self, method: str, path: str, **kwargs: Any) -> Any | None:
+        self.last_error = None
         try:
             return self.call(method, path, **kwargs)
         except Exception as exc:
+            self.last_error = exc
             if self.verbose:
-                debug(f"Request unavailable: {method.upper()} {path} ({type(exc).__name__})")
+                debug(f"Request unavailable: {method.upper()} {path}: {exc}")
             return None
 
 
@@ -299,7 +319,7 @@ def main() -> int:
                     oneip_count=args.oneip_count,
                 )
                 for result_row in target_rows:
-                    if result_row["status"] == "not-found" and result_row.get("notes"):
+                    if result_row["status"] in {"not-found", "error"} and result_row.get("notes"):
                         say(f"[WARN] {target['value']}: {result_row['notes']}", style="yellow")
                 rows.extend(target_rows)
                 raw.append({"target": target["value"], "responses": target_raw})
@@ -318,10 +338,16 @@ def main() -> int:
         Path(args.raw_json).write_text(json.dumps(raw, indent=2, ensure_ascii=False), encoding="utf-8")
     display_results(rows)
     found = sum(row["status"] == "found" for row in rows)
-    say("[+] Lookup completed successfully.", style="green")
+    has_errors = any(row["status"] == "error" for row in rows)
+    say(
+        "[!] Lookup finished with errors; some targets may be incomplete."
+        if has_errors
+        else "[+] Lookup completed successfully.",
+        style="yellow" if has_errors else "green",
+    )
     say(f"[+] Endpoints found : {found}", style="green")
     say(f"[+] CSV report      : {output.resolve()}", style="green")
-    return 0
+    return 5 if has_errors else 0
 
 
 def parse_args() -> argparse.Namespace:
@@ -477,14 +503,9 @@ def normalize_mac(mac: str) -> str:
 
 
 def mac_query_values(mac: str) -> list[str]:
-    """Return MAC notations commonly accepted by NetBrain's One-IP API."""
+    """Return the Cisco dotted MAC notation accepted by this One-IP API."""
     digits = re.sub(r"[^0-9a-fA-F]", "", mac).upper()
-    return [
-        f"{digits[:4]}.{digits[4:8]}.{digits[8:]}",
-        ":".join(digits[i : i + 2] for i in range(0, 12, 2)),
-        "-".join(digits[i : i + 2] for i in range(0, 12, 2)),
-        digits,
-    ]
+    return [f"{digits[:4]}.{digits[4:8]}.{digits[8:]}"]
 
 
 def make_target(raw: str) -> dict[str, str]:
@@ -559,19 +580,22 @@ def lookup(
         "endpointMac",
     ]
 
-    for path in endpoints:
-        for key in keys:
-            payload = {key: target["value"]}
-            for method, kwargs in (("GET", {"params": payload}), ("POST", {"body": payload})):
-                result = nb.try_call(method, path, **kwargs)
-                if not result:
-                    continue
-                raw.append({"method": method, "path": path, "key": key, "response": result})
-                records = records_from(result)
-                if records:
-                    rows = useful_rows(target, records, path)
-                    if rows:
-                        return rows, raw
+    # The default connected-port and generic search paths are IP-only in this
+    # environment; probing them for MACs produces dozens of irrelevant 404s.
+    if target["type"] == "IP" or endpoints != DEFAULT_ENDPOINTS:
+        for path in endpoints:
+            for key in keys:
+                payload = {key: target["value"]}
+                for method, kwargs in (("GET", {"params": payload}), ("POST", {"body": payload})):
+                    result = nb.try_call(method, path, **kwargs)
+                    if not result:
+                        continue
+                    raw.append({"method": method, "path": path, "key": key, "response": result})
+                    records = records_from(result)
+                    if records:
+                        rows = useful_rows(target, records, path)
+                        if rows:
+                            return rows, raw
 
     if target["type"] == "IP":
         device = nb.try_call("GET", "/ServicesAPI/API/V1/CMDB/Devices", params={"ip": target["value"], "fullattr": 1})
@@ -581,23 +605,30 @@ def lookup(
             row["notes"] = "La IP aparece como dispositivo NetBrain, no como endpoint final."
             return [row], raw + [{"path": "/ServicesAPI/API/V1/CMDB/Devices", "response": device}]
 
-    for path in SEARCH_ENDPOINTS:
-        for key in ("keyword", "searchText", "searchString", "q", "query", "text"):
-            payload = {key: target["value"], "limit": 20, "skip": 0}
-            for method, kwargs in (("GET", {"params": payload}), ("POST", {"body": payload})):
-                result = nb.try_call(method, path, **kwargs)
-                records = filter_target_records(records_from(result), target) if result else []
-                if result:
-                    raw.append({"method": method, "path": path, "key": key, "response": result})
-                if records:
-                    rows = useful_rows(target, records, path)
-                    if rows:
-                        return rows, raw
+    if target["type"] == "IP":
+        for path in SEARCH_ENDPOINTS:
+            for key in ("keyword", "searchText", "searchString", "q", "query", "text"):
+                payload = {key: target["value"], "limit": 20, "skip": 0}
+                for method, kwargs in (("GET", {"params": payload}), ("POST", {"body": payload})):
+                    result = nb.try_call(method, path, **kwargs)
+                    records = filter_target_records(records_from(result), target) if result else []
+                    if result:
+                        raw.append({"method": method, "path": path, "key": key, "response": result})
+                    if records:
+                        rows = useful_rows(target, records, path)
+                        if rows:
+                            return rows, raw
 
-    row = empty_row(target, "not-found")
-    errors = list(dict.fromkeys(item["api_error"] for item in raw if item.get("api_error")))
+    errors = list(
+        dict.fromkeys(
+            item.get("api_error") or item.get("lookup_error")
+            for item in raw
+            if item.get("api_error") or item.get("lookup_error")
+        )
+    )
+    row = empty_row(target, "error" if errors else "not-found")
     if errors:
-        row["notes"] = "One-IP API: " + "; ".join(errors)
+        row["notes"] = "One-IP lookup incomplete: " + "; ".join(errors)
     return [row], raw
 
 
@@ -636,6 +667,8 @@ def oneip_lookup(
             if error := api_status_error(result):
                 entry["api_error"] = error
             raw.append(entry)
+        elif nb.last_error:
+            raw.append({"path": path, "params": params, "api_error": str(nb.last_error)})
         if nb.verbose:
             error = api_status_error(result) if result else ""
             detail = f"; {error}" if error else ""
@@ -664,6 +697,8 @@ def oneip_lookup(
             if error := api_status_error(result):
                 entry["api_error"] = error
             raw.append(entry)
+        elif nb.last_error:
+            raw.append({"path": path, "params": params, "api_error": str(nb.last_error)})
         if nb.verbose:
             status = ci_get(result, "statusCode") if isinstance(result, dict) else "unavailable"
             description = ci_get(result, "statusDescription") if isinstance(result, dict) else ""
@@ -678,6 +713,13 @@ def oneip_lookup(
             break
         signature = json.dumps(records, sort_keys=True, ensure_ascii=False)
         if signature in seen_pages:
+            raw.append(
+                {
+                    "path": path,
+                    "params": params,
+                    "lookup_error": "NetBrain returned the same page twice; the One-IP scan stopped before completion.",
+                }
+            )
             break
         seen_pages.add(signature)
         if matches:
@@ -1006,4 +1048,3 @@ if __name__ == "__main__":
     except Exception as exc:
         exit_code = report_error(f"[-] ERROR: Unexpected error ({type(exc).__name__}).", 1)
     raise SystemExit(exit_code)
-
