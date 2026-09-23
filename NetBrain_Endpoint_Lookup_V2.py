@@ -811,11 +811,10 @@ def write_csv(path: Path, rows: list[dict[str, str]]) -> None:
 
 def say(message: str, *, error: bool = False) -> None:
     """Print plain operational text through Rich when it is installed."""
-    stream = sys.stderr if error else sys.stdout
-    if console:
-        console.print(message, file=stream)
+    if console and not error:
+        console.print(message)
     else:
-        print(message, file=stream)
+        print(message, file=sys.stderr if error else sys.stdout)
 
 
 def debug(message: str) -> None:
