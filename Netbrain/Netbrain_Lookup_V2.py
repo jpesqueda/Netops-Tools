@@ -12,7 +12,7 @@ Author:
     Peskicorp
 
 Version:
-    2.0.2
+    2.0.3
 
 Requirements:
     Python 3.10+
@@ -50,7 +50,7 @@ except ImportError:
 
 SESSION = "/ServicesAPI/API/V1/Session"
 DEFAULT_OUTPUT = "netbrain_endpoint_report.csv"
-VERSION = "NetBrain Endpoint Lookup 2.0.2"
+VERSION = "NetBrain Endpoint Lookup 2.0.3"
 console = Console(markup=False) if Console else None
 DEFAULT_ENDPOINTS = [
     "/ServicesAPI/API/V1/CMDB/Devices/ConnectedSwitchPorts",
@@ -639,7 +639,11 @@ def oneip_lookup(
         if nb.verbose:
             error = api_status_error(result) if result else ""
             detail = f"; {error}" if error else ""
-            debug(f"One-IP query ({query_key}={value}): {len(candidates)} record(s), {len(records)} match(es){detail}")
+            keys = ",".join(str(key) for key in result) if isinstance(result, dict) else type(result).__name__
+            debug(
+                f"One-IP query ({query_key}={value}): records={len(candidates)}, matches={len(records)}, "
+                f"response_keys={keys or 'none'}{detail}"
+            )
         if records:
             rows = useful_rows(target, records, path)
             if rows:
@@ -654,20 +658,28 @@ def oneip_lookup(
         params = {"ip": "", "beginIndex": begin, "count": page_size}
         result = nb.try_call("GET", path, params=params)
         records = records_from(result) if result else []
+        matches = filter_target_records(records, target)
         if result:
             entry = {"path": path, "params": params, "record_count": len(records)}
             if error := api_status_error(result):
                 entry["api_error"] = error
             raw.append(entry)
-            if nb.verbose and (error := api_status_error(result)):
-                debug(f"One-IP page {begin}: {error}")
+        if nb.verbose:
+            status = ci_get(result, "statusCode") if isinstance(result, dict) else "unavailable"
+            description = ci_get(result, "statusDescription") if isinstance(result, dict) else ""
+            debug(
+                f"One-IP scan beginIndex={begin}: rows={len(records)}, matches={len(matches)}, statusCode={status}, "
+                f"description={description or 'N/A'}"
+            )
+            if begin == 0 and records:
+                samples = mac_samples(records)
+                debug(f"One-IP first-page MAC samples: {', '.join(samples) or 'no MAC fields detected'}")
         if not records:
             break
         signature = json.dumps(records, sort_keys=True, ensure_ascii=False)
         if signature in seen_pages:
             break
         seen_pages.add(signature)
-        matches = filter_target_records(records, target)
         if matches:
             rows = useful_rows(target, matches, path)
             if rows:
@@ -694,6 +706,21 @@ def filter_target_records(records: list[dict[str, Any]], target: dict[str, str])
             if wanted in normalized or any(wanted in value for value in normalized):
                 matches.append(record)
     return matches
+
+
+def mac_samples(records: list[dict[str, Any]], limit: int = 5) -> list[str]:
+    samples: list[str] = []
+    for record in records:
+        for key, value in flatten(record).items():
+            if "mac" not in clean(key):
+                continue
+            for candidate in MAC_RE.findall(stringify(value)):
+                normalized = normalize_mac(candidate)
+                if normalized not in samples:
+                    samples.append(normalized)
+                    if len(samples) == limit:
+                        return samples
+    return samples
 
 
 def useful_rows(target: dict[str, str], records: list[dict[str, Any]], source: str) -> list[dict[str, str]]:
@@ -979,3 +1006,4 @@ if __name__ == "__main__":
     except Exception as exc:
         exit_code = report_error(f"[-] ERROR: Unexpected error ({type(exc).__name__}).", 1)
     raise SystemExit(exit_code)
+
