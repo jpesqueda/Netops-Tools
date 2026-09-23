@@ -12,7 +12,7 @@ Author:
     Peskicorp
 
 Version:
-    2.0.0
+    1.0.0
 
 Requirements:
     Python 3.10+
@@ -50,7 +50,7 @@ except ImportError:
 
 SESSION = "/ServicesAPI/API/V1/Session"
 DEFAULT_OUTPUT = "netbrain_endpoint_report.csv"
-VERSION = "NetBrain Endpoint Lookup 2.0.0"
+VERSION = "NetBrain Endpoint Lookup 1.0.0"
 console = Console(markup=False) if Console else None
 DEFAULT_ENDPOINTS = [
     "/ServicesAPI/API/V1/CMDB/Devices/ConnectedSwitchPorts",
@@ -470,6 +470,17 @@ def normalize_mac(mac: str) -> str:
     return ":".join(digits[i : i + 2] for i in range(0, 12, 2))
 
 
+def mac_query_values(mac: str) -> list[str]:
+    """Return MAC notations commonly accepted by NetBrain's One-IP API."""
+    digits = re.sub(r"[^0-9a-fA-F]", "", mac).upper()
+    return [
+        f"{digits[:4]}.{digits[4:8]}.{digits[8:]}",
+        ":".join(digits[i : i + 2] for i in range(0, 12, 2)),
+        "-".join(digits[i : i + 2] for i in range(0, 12, 2)),
+        digits,
+    ]
+
+
 def make_target(raw: str) -> dict[str, str]:
     kind = detect_target_type(raw)
     value = raw.strip()
@@ -599,56 +610,49 @@ def connected_switch_port_lookup(
 def oneip_lookup(
     nb: NetBrain, target: dict[str, str], *, scan: bool, count: int
 ) -> tuple[list[dict[str, str]], list[dict[str, Any]]]:
-    paths = [
-        "/ServicesAPI/API/V1/CMDB/IP/OneIPTable",
-        "/ServicesAPI/API/V1/CMDB/Topology/OneIPTable",
-    ]
-    query_keys = ["ip", "Ip", "IP", "ipAddress", "IP Address"] if target["type"] == "IP" else [
-        "mac",
-        "Mac",
-        "MAC",
-        "macAddress",
-        "MacAddress",
-        "MAC Address",
-    ]
+    path = "/ServicesAPI/API/V1/CMDB/Topology/OneIPTable"
+    query_key = "ip" if target["type"] == "IP" else "mac"
+    query_values = [target["value"]] if target["type"] == "IP" else mac_query_values(target["value"])
+    page_size = max(1, min(count, 10000))
     raw: list[dict[str, Any]] = []
 
-    for path in paths:
-        for key in query_keys:
-            params = {key: target["value"], "beginIndex": 0, "count": count}
-            result = nb.try_call("GET", path, params=params)
-            records = filter_target_records(records_from(result), target) if result else []
-            if result:
-                raw.append({"path": path, "params": params, "response": result})
-            if records:
-                rows = useful_rows(target, records, path)
-                if rows:
-                    return rows, raw
+    for value in query_values:
+        params = {query_key: value, "beginIndex": 0, "count": page_size}
+        result = nb.try_call("GET", path, params=params)
+        candidates = records_from(result) if result else []
+        records = filter_target_records(candidates, target)
+        if result:
+            raw.append({"path": path, "params": params, "response": result})
+        if nb.verbose:
+            debug(f"One-IP query ({query_key}={value}): {len(candidates)} record(s), {len(records)} MAC/IP match(es)")
+        if records:
+            rows = useful_rows(target, records, path)
+            if rows:
+                return rows, raw
 
     if not scan:
         return [], raw
 
-    for path in paths:
-        begin = 0
-        seen_pages: set[str] = set()
-        while True:
-            params = {"beginIndex": begin, "count": count}
-            result = nb.try_call("GET", path, params=params)
-            records = records_from(result) if result else []
-            if result:
-                raw.append({"path": path, "params": params, "record_count": len(records)})
-            if not records:
-                break
-            signature = json.dumps(records, sort_keys=True, ensure_ascii=False)
-            if signature in seen_pages:
-                break
-            seen_pages.add(signature)
-            matches = filter_target_records(records, target)
-            if matches:
-                rows = useful_rows(target, matches, path)
-                if rows:
-                    return rows, raw
-            begin += len(records)
+    begin = 0
+    seen_pages: set[str] = set()
+    while True:
+        params = {"beginIndex": begin, "count": page_size}
+        result = nb.try_call("GET", path, params=params)
+        records = records_from(result) if result else []
+        if result:
+            raw.append({"path": path, "params": params, "record_count": len(records)})
+        if not records:
+            break
+        signature = json.dumps(records, sort_keys=True, ensure_ascii=False)
+        if signature in seen_pages:
+            break
+        seen_pages.add(signature)
+        matches = filter_target_records(records, target)
+        if matches:
+            rows = useful_rows(target, matches, path)
+            if rows:
+                return rows, raw
+        begin += len(records)
     return [], raw
 
 
