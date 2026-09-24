@@ -12,7 +12,7 @@ Author:
     Peskicorp
 
 Version:
-    2.3.0
+    2.4.0
 
 Requirements:
     Python 3.10+
@@ -91,7 +91,7 @@ except ImportError:
 SESSION = "/ServicesAPI/API/V1/Session"
 DEFAULT_OUTPUT = "netbrain_endpoint_report.csv"
 ONEIP_DEEP_OFFSET_LIMIT = 20000
-VERSION = "NetBrain Endpoint Lookup 2.3.0"
+VERSION = "NetBrain Endpoint Lookup 2.4.0"
 console = Console(markup=False) if Console else None
 DEFAULT_ENDPOINTS = [
     "/ServicesAPI/API/V1/CMDB/Devices/ConnectedSwitchPorts",
@@ -906,14 +906,79 @@ def _safe_oneip_request(
     return result, records_from(result), ""
 
 
+
+def _first_record_value(records: list[dict[str, Any]], *field_names: str) -> str:
+    """Return the first non-empty value for any requested top-level field.
+
+    Used only for capability tests. The returned value is sent back to NetBrain
+    as a query parameter and is never printed to the terminal.
+    """
+    wanted = {clean(name) for name in field_names}
+    for record in records:
+        for key, value in record.items():
+            if clean(str(key)) in wanted:
+                rendered = stringify(value).strip()
+                if rendered:
+                    return rendered
+    return ""
+
+
+def _test_oneip_filter(
+    nb: NetBrain,
+    path: str,
+    parameter: str,
+    sample_value: str,
+    count: int = 100,
+) -> tuple[str, int, str]:
+    """Test a One-IP filter without exposing the sample value.
+
+    Returns:
+        ("SUPPORTED", rows, "")
+        ("REJECTED", 0, error)
+        ("NO_SAMPLE", 0, "")
+    """
+    if not sample_value:
+        return "NO_SAMPLE", 0, ""
+
+    params = {
+        parameter: sample_value,
+        "beginIndex": 0,
+        "count": max(1, min(count, 100)),
+    }
+    result, records, error = _safe_oneip_request(nb, path, params)
+    if result is None:
+        return "REJECTED", 0, error
+    return "SUPPORTED", len(records), ""
+
+
+def _get_product_version(nb: NetBrain) -> tuple[str, str]:
+    """Return sanitized NetBrain product/software version information if exposed."""
+    paths = (
+        "/ServicesAPI/API/V1/System/ProductVersion",
+        "/ServicesAPI/API/V1/System/nodeinfo",
+    )
+    for path in paths:
+        result = nb.try_call("GET", path)
+        if not isinstance(result, dict):
+            continue
+        product = ci_get(result, "productVersion")
+        software = ci_get(result, "softwareVersion")
+        if product or software:
+            return stringify(product).strip(), stringify(software).strip()
+    return "", ""
+
+
 def run_oneip_diagnostics(nb: NetBrain, requested_count: int) -> int:
     """Inspect One-IP table size and pagination without exposing network records.
 
-    The diagnostic answers four questions:
-      1. Does the API expose an exact total record count?
-      2. Is record index 19,999 accessible?
-      3. What happens when beginIndex reaches 20,000?
-      4. Does the accessible response expose a usable afterId/cursor?
+    The diagnostic answers seven questions:
+      1. Which NetBrain product/software version is exposed?
+      2. Does the API expose an exact total record count?
+      3. Is record index 19,999 accessible?
+      4. What happens when beginIndex reaches 20,000?
+      5. Does the accessible response expose a usable afterId/cursor?
+      6. Which documented One-IP filters work in this deployment?
+      7. Can switch_name or lan partitioning bypass the global 20,000-row limit?
 
     Only counts, response field names, and capability results are printed.
     IP addresses, MAC addresses, hostnames, cursor values, and One-IP rows are
@@ -925,7 +990,16 @@ def run_oneip_diagnostics(nb: NetBrain, requested_count: int) -> int:
     say("\n" + "=" * 68, style="green")
     say("ONE-IP TABLE DIAGNOSTICS".center(68), style="green")
     say("=" * 68, style="green")
-    say("[+] Reading One-IP metadata...", style="green")
+
+    say("[+] Reading NetBrain version information...", style="green")
+    product_version, software_version = _get_product_version(nb)
+    if product_version or software_version:
+        say(f"    Product version    : {product_version or 'N/A'}")
+        say(f"    Software version   : {software_version or 'N/A'}")
+    else:
+        say("    Product version    : Not exposed by tested version endpoint", style="yellow")
+
+    say("\n[+] Reading One-IP metadata...", style="green")
 
     first_params = {"ip": "", "beginIndex": 0, "count": page_size}
     first, first_records, first_error = _safe_oneip_request(nb, path, first_params)
@@ -1031,6 +1105,72 @@ def run_oneip_diagnostics(nb: NetBrain, requested_count: int) -> int:
                 debug(f"afterId test error: {cursor_error}")
 
     # ------------------------------------------------------------------
+    # DOCUMENTED FILTER CAPABILITY TESTS
+    # ------------------------------------------------------------------
+    # NetBrain public One-IP documentation describes filters including ip,
+    # mac, lan, and switch_name. The deployment already showed that "mac"
+    # is rejected, so test all four using values sampled internally from the
+    # first page. Sample values are never printed.
+    sample_ip = _first_record_value(first_records, "ip")
+    sample_mac = _first_record_value(first_records, "mac")
+    sample_lan = _first_record_value(first_records, "lanSegment", "lan")
+    sample_switch = _first_record_value(first_records, "switchName", "switch_name")
+
+    filter_tests: dict[str, tuple[str, int, str]] = {}
+    for label, parameter, sample in (
+        ("ip", "ip", sample_ip),
+        ("mac", "mac", sample_mac),
+        ("lan", "lan", sample_lan),
+        ("switch_name", "switch_name", sample_switch),
+    ):
+        filter_tests[label] = _test_oneip_filter(nb, path, parameter, sample)
+
+    say("\n[+] Testing One-IP partition/filter capabilities...", style="green")
+    for label in ("ip", "mac", "lan", "switch_name"):
+        state, rows_count, error = filter_tests[label]
+        if state == "SUPPORTED":
+            say(f"    {label:<16}: SUPPORTED ({rows_count} row(s) returned)", style="green")
+        elif state == "NO_SAMPLE":
+            say(f"    {label:<16}: NOT TESTED (no sample value in first page)", style="yellow")
+        else:
+            lower = error.casefold()
+            if "invalid parameter" in lower:
+                reason = "invalid parameter"
+            elif "400" in lower:
+                reason = "HTTP 400"
+            else:
+                reason = "request rejected"
+            say(f"    {label:<16}: REJECTED ({reason})", style="yellow")
+            if nb.verbose:
+                debug(f"One-IP filter test {label}: {error}")
+
+    # If switch_name is supported, make one additional partition paging probe.
+    # This does not expose the switch name. It only tells us whether a filtered
+    # partition can be paged independently.
+    switch_partition_viable = False
+    switch_state, switch_rows, _ = filter_tests["switch_name"]
+    if switch_state == "SUPPORTED" and sample_switch:
+        probe_params = {
+            "switch_name": sample_switch,
+            "beginIndex": 100,
+            "count": 1,
+        }
+        probe_result, probe_records, probe_error = _safe_oneip_request(nb, path, probe_params)
+        if probe_result is not None:
+            switch_partition_viable = True
+            say(
+                f"    switch partition   : PAGING ACCEPTED "
+                f"(offset 100 returned {len(probe_records)} row(s))",
+                style="green",
+            )
+        else:
+            say("    switch partition   : FILTER WORKS; paging probe rejected", style="yellow")
+            if nb.verbose:
+                debug(f"switch_name partition paging probe: {probe_error}")
+
+    lan_partition_viable = filter_tests["lan"][0] == "SUPPORTED"
+
+    # ------------------------------------------------------------------
     # CONCLUSION
     # ------------------------------------------------------------------
     say("\n[+] Diagnostic conclusion", style="green")
@@ -1071,7 +1211,41 @@ def run_oneip_diagnostics(nb: NetBrain, requested_count: int) -> int:
         say("    Cursor paging      : Cursor field exists, but afterId request was rejected", style="yellow")
     else:
         say("    Cursor paging      : No usable cursor exposed in the tested response", style="yellow")
-        say("    Next engineering   : Inspect NetBrain version-specific pagination metadata/API behavior.", style="yellow")
+
+    # Recommend a tested alternative only when the deployment actually accepts it.
+    if switch_partition_viable:
+        say(
+            "    Alternate strategy : SUPPORTED - partition One-IP lookups by switch_name",
+            style="green",
+        )
+        say(
+            "    Next engineering   : Enumerate switches, query each switch partition, "
+            "and match target MACs locally.",
+            style="green",
+        )
+    elif lan_partition_viable:
+        say(
+            "    Alternate strategy : POSSIBLE - partition One-IP lookups by LAN segment",
+            style="green",
+        )
+        say(
+            "    Next engineering   : Enumerate LAN segments and search target MACs per partition.",
+            style="green",
+        )
+    elif cursor_supported:
+        say(
+            "    Next engineering   : Replace the 20,000-row cap with afterId pagination.",
+            style="green",
+        )
+    else:
+        say(
+            "    Alternate strategy : No tested partition workaround confirmed yet",
+            style="yellow",
+        )
+        say(
+            "    Next engineering   : Inspect deployment-specific APIs or NetBrain support metadata.",
+            style="yellow",
+        )
 
     say("\n[+] Diagnostic completed. No One-IP record values were printed.", style="green")
     return 0
