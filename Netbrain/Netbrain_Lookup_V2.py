@@ -12,7 +12,7 @@ Author:
     Peskicorp
 
 Version:
-    2.1.0
+    2.2.1
 
 Requirements:
     Python 3.10+
@@ -20,7 +20,44 @@ Requirements:
 
 Installation:
     pip install rich
+
+Security / Sanitization:
+    This source file contains no production server names, usernames, passwords,
+    tenant/domain names, IP addresses, MAC addresses, serial numbers, or site names.
+    Documentation examples use reserved/generic values only:
+        NetBrain URL : https://netbrain.example.local
+        IPv4 pattern : 192.168.1.X
+        MAC address  : aa:aa:aa:aa:aa:aa
+        Username     : USERNAME
+        Password     : PASSWORD
+
+    Important: The SOURCE CODE is sanitized. Runtime terminal output, CSV files,
+    and --raw-json files will contain the real IP/MAC/device information returned
+    by your NetBrain environment unless you sanitize those generated artifacts.
+
+Code Sections:
+    01 - Imports and dependencies
+    02 - Global configuration and API paths
+    03 - Exceptions
+    04 - NetBrain API client
+         Authentication: requesting token
+         Session: deleting token
+         Connectivity validation
+         Generic REST requests
+    05 - Main workflow
+    06 - Command-line arguments
+    07 - Tenant and domain selection
+    08 - Target loading, validation, and normalization
+    09 - Endpoint lookup orchestration
+    10 - One-IP Table lookup and pagination
+    11 - Result parsing and correlation
+    12 - CSV and terminal output
+    13 - Program entry point and error handling
 """
+
+# ============================================================================
+# SECTION 01 - IMPORTS AND DEPENDENCIES
+# ============================================================================
 
 from __future__ import annotations
 
@@ -47,10 +84,14 @@ except ImportError:
     box = Console = Table = Text = None
 
 
+# ============================================================================
+# SECTION 02 - GLOBAL CONFIGURATION AND NETBRAIN API PATHS
+# ============================================================================
+
 SESSION = "/ServicesAPI/API/V1/Session"
 DEFAULT_OUTPUT = "netbrain_endpoint_report.csv"
 ONEIP_DEEP_OFFSET_LIMIT = 20000
-VERSION = "NetBrain Endpoint Lookup 2.1.0"
+VERSION = "NetBrain Endpoint Lookup 2.2.1"
 console = Console(markup=False) if Console else None
 DEFAULT_ENDPOINTS = [
     "/ServicesAPI/API/V1/CMDB/Devices/ConnectedSwitchPorts",
@@ -120,6 +161,10 @@ ALIASES = {
 IGNORE_KEYS = {"statuscode", "statusdescription", "status", "message", "error", "errors"}
 
 
+# ============================================================================
+# SECTION 03 - CUSTOM EXCEPTIONS
+# ============================================================================
+
 class NetBrainError(RuntimeError):
     pass
 
@@ -138,6 +183,10 @@ class NetBrainAPIError(NetBrainError):
         self.http_status = http_status
 
 
+# ============================================================================
+# SECTION 04 - NETBRAIN API CLIENT
+# ============================================================================
+
 class NetBrain:
     def __init__(self, url: str, user: str, password: str, args: argparse.Namespace) -> None:
         self.url = url.rstrip("/")
@@ -150,6 +199,20 @@ class NetBrain:
         self.headers = {"Content-Type": "application/json", "Accept": "application/json"}
         self.last_error: Exception | None = None
 
+        # Capability/cache state for NetBrain releases where the One-IP Table
+        # documents a ``mac`` filter but the deployed API rejects it with HTTP 400.
+        # In that case we transparently build a bounded One-IP cache once and
+        # reuse it for every MAC target instead of failing every lookup.
+        self.oneip_mac_filter_supported: bool | None = None
+        self.oneip_cache: list[dict[str, Any]] | None = None
+        self.oneip_cache_complete = False
+        self.oneip_cache_warning = ""
+
+    # -------------------------------------------------------------------------
+    # AUTHENTICATION - REQUESTING TOKEN
+    # -------------------------------------------------------------------------
+    # Sends username/password to the NetBrain Session API. If authentication is
+    # successful, NetBrain returns a token that is added to subsequent requests.
     def login(self) -> None:
         body = {"username": self.user, "password": self.password}
         if self.auth_id:
@@ -161,14 +224,24 @@ class NetBrain:
             if exc.http_status in {400, 401, 403}:
                 raise AuthenticationError("NetBrain authentication failed.") from exc
             raise
+        finally:
+            # Do not keep the clear-text password longer than necessary.
+            self.password = ""
+            body["password"] = ""
         if not token:
             raise AuthenticationError("NetBrain authentication failed.")
         self.headers.update({"Token": token, "token": token})
 
+    # -------------------------------------------------------------------------
+    # SESSION - DELETING TOKEN / LOGOUT
+    # -------------------------------------------------------------------------
     def logout(self) -> None:
         if "Token" in self.headers:
             self.try_call("DELETE", SESSION)
 
+    # -------------------------------------------------------------------------
+    # CONNECTIVITY - VALIDATING NETBRAIN REACHABILITY
+    # -------------------------------------------------------------------------
     def validate_connection(self) -> None:
         last_error = None
         for path in (SESSION, "/"):
@@ -188,6 +261,9 @@ class NetBrain:
                     debug(f"Connectivity probe failed: {type(exc).__name__}")
         raise NetBrainUnreachable("Unable to reach NetBrain server.") from last_error
 
+    # -------------------------------------------------------------------------
+    # REST CLIENT - SENDING AUTHENTICATED API REQUESTS
+    # -------------------------------------------------------------------------
     def call(
         self,
         method: str,
@@ -246,6 +322,9 @@ class NetBrain:
         except json.JSONDecodeError as exc:
             raise NetBrainAPIError(f"NetBrain API returned invalid JSON: {path}") from exc
 
+    # -------------------------------------------------------------------------
+    # SAFE API WRAPPER - CAPTURING NON-FATAL REQUEST ERRORS
+    # -------------------------------------------------------------------------
     def try_call(self, method: str, path: str, **kwargs: Any) -> Any | None:
         self.last_error = None
         try:
@@ -256,6 +335,10 @@ class NetBrain:
                 debug(f"Request unavailable: {method.upper()} {path}: {exc}")
             return None
 
+
+# ============================================================================
+# SECTION 05 - MAIN WORKFLOW
+# ============================================================================
 
 def main() -> int:
     args = parse_args()
@@ -292,6 +375,7 @@ def main() -> int:
         if not url:
             say("[-] ERROR: NetBrain URL is required.", error=True)
             return 2
+        # Credentials are supplied at runtime. Nothing is hardcoded in the source.
         user = args.username or input("NetBrain Username: ").strip()
         password = args.password if args.password is not None else getpass.getpass("NetBrain Password: ")
         nb = NetBrain(url, user, password, args)
@@ -350,19 +434,24 @@ def main() -> int:
     return 5 if has_errors else 0
 
 
+# ============================================================================
+# SECTION 06 - COMMAND-LINE ARGUMENTS
+# ============================================================================
+
 def parse_args() -> argparse.Namespace:
     examples = """USAGE
   python netbrain_endpoint_lookup.py --url URL --host TARGET
   python netbrain_endpoint_lookup.py --url URL --hosts-file FILE
 
 EXAMPLES
-  python netbrain_endpoint_lookup.py --url https://netbrain.local --host 172.16.0.55
-  python netbrain_endpoint_lookup.py --url https://netbrain.local --host e4:b9:7a:f9:b6:27
-  python netbrain_endpoint_lookup.py --url https://netbrain.local --host e4-b9-7a-f9-b6-27
-  python netbrain_endpoint_lookup.py --url https://netbrain.local --hosts-file hosts.txt
-  python netbrain_endpoint_lookup.py --url https://netbrain.local --hosts-file hosts.txt --insecure
-  python netbrain_endpoint_lookup.py --url https://netbrain.local --hosts-file hosts.txt --user USERNAME --password PASSWORD --insecure
-  python netbrain_endpoint_lookup.py --url https://netbrain.local --hosts-file hosts.txt --output endpoints.csv"""
+  # Generic IPv4 example (192.168.1.X)
+  python netbrain_endpoint_lookup.py --url https://netbrain.example.local --host 192.168.1.10
+  python netbrain_endpoint_lookup.py --url https://netbrain.example.local --host aa:aa:aa:aa:aa:aa
+  python netbrain_endpoint_lookup.py --url https://netbrain.example.local --host aa-aa-aa-aa-aa-aa
+  python netbrain_endpoint_lookup.py --url https://netbrain.example.local --hosts-file hosts.txt
+  python netbrain_endpoint_lookup.py --url https://netbrain.example.local --hosts-file hosts.txt --insecure
+  python netbrain_endpoint_lookup.py --url https://netbrain.example.local --hosts-file hosts.txt --user USERNAME --insecure
+  python netbrain_endpoint_lookup.py --url https://netbrain.example.local --hosts-file hosts.txt --output endpoints.csv"""
     p = argparse.ArgumentParser(
         description=(
             "DESCRIPTION\n"
@@ -374,7 +463,7 @@ EXAMPLES
     )
     p.add_argument("--version", action="version", version=f"{VERSION}\nAuthor: Peskicorp")
     inputs = p.add_argument_group("INPUT OPTIONS")
-    inputs.add_argument("--url", help="NetBrain base URL, e.g. https://netbrain.local")
+    inputs.add_argument("--url", help="NetBrain base URL, e.g. https://netbrain.example.local")
     target_input = inputs.add_mutually_exclusive_group(required=True)
     target_input.add_argument("--host", help="Single IPv4 or MAC target; type is detected automatically")
     target_input.add_argument("--hosts-file", help="Text file with one or more IP/MAC targets")
@@ -391,7 +480,10 @@ EXAMPLES
 
     output = p.add_argument_group("OUTPUT OPTIONS")
     output.add_argument("-o", "--output", default=DEFAULT_OUTPUT, help=f"CSV output path (default: {DEFAULT_OUTPUT})")
-    output.add_argument("--raw-json", help="Save raw API responses to a JSON file")
+    output.add_argument(
+        "--raw-json",
+        help="Save raw API responses to JSON (WARNING: runtime output may contain live network data)",
+    )
 
     advanced = p.add_argument_group("NETBRAIN OPTIONS")
     advanced.add_argument("--tenant", help="Tenant name or ID")
@@ -415,6 +507,10 @@ EXAMPLES
     advanced.add_argument("-v", "--verbose", action="store_true", help="Show target and request diagnostics; secrets are omitted")
     return p.parse_args()
 
+
+# ============================================================================
+# SECTION 07 - TENANT AND DOMAIN SELECTION
+# ============================================================================
 
 def select_domain(nb: NetBrain, tenant_arg: str | None, domain_arg: str | None) -> None:
     tenants = (nb.try_call("GET", "/ServicesAPI/API/V1/CMDB/Tenants") or {}).get("tenants", [])
@@ -460,6 +556,10 @@ def choose(items: list[dict[str, Any]], wanted: str | None, name: str, item_id: 
         return items[int(answer) - 1]
     return choose(items, answer, name, item_id, label)
 
+
+# ============================================================================
+# SECTION 08 - TARGET LOADING, VALIDATION, AND NORMALIZATION
+# ============================================================================
 
 def load_targets(file_path: str | Path) -> list[dict[str, str]]:
     """Load IP/MAC targets and retain invalid entries for the final report."""
@@ -569,6 +669,10 @@ def debug_target(original: str, target: dict[str, str], verbose: bool) -> None:
         debug(f"Normalized MAC: {target['value']}")
 
 
+# ============================================================================
+# SECTION 09 - ENDPOINT LOOKUP ORCHESTRATION
+# ============================================================================
+
 def lookup(
     nb: NetBrain,
     target: dict[str, str],
@@ -616,8 +720,9 @@ def lookup(
         "endpointMac",
     ]
 
-    # The default connected-port and generic search paths are IP-only in this
-    # environment; probing them for MACs produces dozens of irrelevant 404s.
+    # Some NetBrain deployments expose the default connected-port and generic
+    # search paths as IP-only; probing those paths for MAC targets can create
+    # unnecessary 404 responses.
     if target["type"] == "IP" or endpoints != DEFAULT_ENDPOINTS:
         for path in endpoints:
             for key in keys:
@@ -689,49 +794,131 @@ def connected_switch_port_lookup(
     return rows, raw
 
 
+# ============================================================================
+# SECTION 10 - ONE-IP TABLE LOOKUP AND PAGINATION
+# ============================================================================
+
+def _is_invalid_mac_filter_error(exc: Exception | None) -> bool:
+    """Return True when this NetBrain deployment rejects the One-IP ``mac`` filter."""
+    if not isinstance(exc, NetBrainAPIError) or exc.http_status != 400:
+        return False
+    message = str(exc).casefold()
+    return "parameter 'mac' is invalid" in message or 'parameter "mac" is invalid' in message
+
+
+def _build_oneip_cache(
+    nb: NetBrain, path: str, page_size: int
+) -> tuple[list[dict[str, Any]], bool, str]:
+    """Build a reusable, bounded One-IP cache for MAC fallback lookups.
+
+    Some NetBrain installations reject ``?mac=...`` even though other releases
+    document it.  Scanning once and caching the result avoids repeating a large
+    table walk for every MAC address.  The scan stops before the known deep
+    offset boundary so it does not generate the HTTP 400 seen in older code.
+    """
+    if nb.oneip_cache is not None:
+        return nb.oneip_cache, nb.oneip_cache_complete, nb.oneip_cache_warning
+
+    cache: list[dict[str, Any]] = []
+    begin = 0
+    seen_pages: set[str] = set()
+    warning = ""
+    complete = False
+
+    say(
+        "[+] NetBrain does not accept the One-IP MAC filter; "
+        "building a reusable One-IP cache...",
+        style="yellow",
+    )
+
+    while begin < ONEIP_DEEP_OFFSET_LIMIT:
+        fetch_count = min(page_size, ONEIP_DEEP_OFFSET_LIMIT - begin)
+        params = {"ip": "", "beginIndex": begin, "count": fetch_count}
+        result = nb.try_call("GET", path, params=params)
+
+        if not result:
+            warning = f"One-IP fallback scan stopped at row {begin}: {nb.last_error or 'empty response'}"
+            break
+
+        api_error = api_status_error(result)
+        if api_error:
+            warning = f"One-IP fallback scan stopped at row {begin}: {api_error}"
+            break
+
+        records = records_from(result)
+        if not records:
+            complete = True
+            break
+
+        signature = json.dumps(records, sort_keys=True, ensure_ascii=False)
+        if signature in seen_pages:
+            warning = "NetBrain returned the same One-IP page twice; fallback scan stopped safely."
+            break
+        seen_pages.add(signature)
+
+        cache.extend(records)
+        begin += len(records)
+
+        if nb.verbose and (begin % 5000 == 0 or len(records) < fetch_count):
+            debug(f"One-IP MAC fallback cache: {begin} row(s) loaded")
+
+        if len(records) < fetch_count:
+            complete = True
+            break
+
+    if not complete and not warning and begin >= ONEIP_DEEP_OFFSET_LIMIT:
+        warning = (
+            f"One-IP MAC fallback scanned the first {ONEIP_DEEP_OFFSET_LIMIT} rows. "
+            "This NetBrain deployment rejects the MAC query parameter and also limits deep offset paging; "
+            "MACs outside the cached range may remain unresolved."
+        )
+
+    nb.oneip_cache = cache
+    nb.oneip_cache_complete = complete
+    nb.oneip_cache_warning = warning
+
+    say(f"    One-IP cache : {len(cache)} row(s)", style="green")
+    if warning:
+        say(f"    Cache note   : {warning}", style="yellow")
+
+    return cache, complete, warning
+
+
 def oneip_lookup(
     nb: NetBrain, target: dict[str, str], *, scan: bool, count: int
 ) -> tuple[list[dict[str, str]], list[dict[str, Any]]]:
-    """Lookup a target in NetBrain's One-IP Table.
+    """Lookup an IP or MAC in NetBrain's One-IP Table.
 
-    The preferred path is always the server-side exact filter (``ip`` or
-    ``mac``).  A full table scan is only used when explicitly requested because
-    recent NetBrain backends can reject deep ``beginIndex`` offsets (commonly
-    at 20,000 rows) and the public One-IP payload does not necessarily expose a
-    usable row cursor.
+    IP lookups use the indexed ``ip`` parameter.  MAC lookups first try the
+    documented ``mac`` parameter.  If the deployed NetBrain API rejects that
+    parameter, the code automatically falls back to a reusable One-IP cache
+    instead of marking every MAC as an API error.
     """
     path = "/ServicesAPI/API/V1/CMDB/Topology/OneIPTable"
-    query_key = "ip" if target["type"] == "IP" else "mac"
-    query_values = [target["value"]] if target["type"] == "IP" else mac_query_values(target["value"])
     page_size = max(1, min(count, 1000))
     raw: list[dict[str, Any]] = []
 
-    # 1) Fast/indexed lookup.  This is the normal and recommended path.
-    for value in query_values:
-        params = {query_key: value, "beginIndex": 0, "count": page_size}
+    # ------------------------------------------------------------------
+    # Fast exact lookup
+    # ------------------------------------------------------------------
+    if target["type"] == "IP":
+        params = {"ip": target["value"], "beginIndex": 0, "count": page_size}
         result = nb.try_call("GET", path, params=params)
+        candidates = records_from(result) if result else []
+        records = filter_target_records(candidates, target)
 
         if result:
-            api_error = api_status_error(result)
-            candidates = records_from(result) if not api_error else []
-            records = filter_target_records(candidates, target)
             entry: dict[str, Any] = {"path": path, "params": params, "response": result}
-            if api_error:
-                entry["api_error"] = api_error
+            if error := api_status_error(result):
+                entry["api_error"] = error
             raw.append(entry)
-        else:
-            candidates = []
-            records = []
-            if nb.last_error:
-                raw.append({"path": path, "params": params, "api_error": str(nb.last_error)})
+        elif nb.last_error:
+            raw.append({"path": path, "params": params, "api_error": str(nb.last_error)})
 
         if nb.verbose:
-            error = api_status_error(result) if result else str(nb.last_error or "")
-            detail = f"; {error}" if error else ""
-            keys = ",".join(str(key) for key in result) if isinstance(result, dict) else type(result).__name__
             debug(
-                f"One-IP exact query ({query_key}={value}): records={len(candidates)}, "
-                f"matches={len(records)}, response_keys={keys or 'none'}{detail}"
+                f"One-IP exact query (ip={target['value']}): "
+                f"records={len(candidates)}, matches={len(records)}"
             )
 
         if records:
@@ -739,13 +926,87 @@ def oneip_lookup(
             if rows:
                 return rows, raw
 
-    # Do not turn a clean exact miss into a 20k-row table walk.
-    if not scan:
-        return [], raw
+        if not scan:
+            return [], raw
 
-    # 2) Optional compatibility scan.  Stop before NetBrain's deep-offset
-    # protection is triggered.  If a future release returns a top-level cursor,
-    # use it; otherwise return an incomplete-scan warning, not a hard API error.
+    else:
+        # Try the server-side MAC filter until the server proves that this
+        # deployment does not support it.  Once unsupported, do not repeat the
+        # same HTTP 400 for every address in hosts.txt.
+        if nb.oneip_mac_filter_supported is not False:
+            for value in mac_query_values(target["value"]):
+                params = {"mac": value, "beginIndex": 0, "count": page_size}
+                result = nb.try_call("GET", path, params=params)
+
+                if result:
+                    nb.oneip_mac_filter_supported = True
+                    candidates = records_from(result)
+                    records = filter_target_records(candidates, target)
+                    entry = {"path": path, "params": params, "response": result}
+                    if error := api_status_error(result):
+                        entry["api_error"] = error
+                    raw.append(entry)
+
+                    if nb.verbose:
+                        debug(
+                            f"One-IP exact query (mac={value}): "
+                            f"records={len(candidates)}, matches={len(records)}"
+                        )
+
+                    if records:
+                        rows = useful_rows(target, records, path)
+                        if rows:
+                            return rows, raw
+                    continue
+
+                if _is_invalid_mac_filter_error(nb.last_error):
+                    nb.oneip_mac_filter_supported = False
+                    raw.append(
+                        {
+                            "path": path,
+                            "params": params,
+                            "capability_warning": (
+                                "This NetBrain deployment rejects the One-IP 'mac' query parameter; "
+                                "using cached table-scan fallback."
+                            ),
+                        }
+                    )
+                    if nb.verbose:
+                        debug("One-IP MAC query parameter rejected by server; enabling cached fallback.")
+                    break
+
+                if nb.last_error:
+                    raw.append({"path": path, "params": params, "api_error": str(nb.last_error)})
+
+        # Automatic compatibility fallback.  This is intentionally enabled for
+        # MAC targets when the live server rejects the MAC query parameter.
+        if nb.oneip_mac_filter_supported is False:
+            cache, complete, warning = _build_oneip_cache(nb, path, page_size)
+            matches = filter_target_records(cache, target)
+            raw.append(
+                {
+                    "path": path,
+                    "fallback": "cached-oneip-scan",
+                    "cached_rows": len(cache),
+                    "cache_complete": complete,
+                }
+            )
+            if warning:
+                raw.append({"path": path, "scan_warning": warning})
+            if matches:
+                rows = useful_rows(target, matches, path)
+                if rows:
+                    return rows, raw
+            return [], raw
+
+        if not scan:
+            return [], raw
+
+    # ------------------------------------------------------------------
+    # Optional generic full scan (mainly useful for an IP exact miss).
+    # MACs normally reach this block only when the server accepted ``mac`` but
+    # returned no match and the user explicitly supplied --oneip-scan.
+    # ------------------------------------------------------------------
     begin = 0
     seen_pages: set[str] = set()
     last_page: Any = None
@@ -767,7 +1028,7 @@ def oneip_lookup(
                     "params": {"ip": "", "beginIndex": begin, "count": page_size},
                     "scan_warning": (
                         f"One-IP fallback scan stopped at {ONEIP_DEEP_OFFSET_LIMIT} rows to avoid "
-                        "NetBrain deep-offset HTTP 400. Exact ip/mac lookup returned no match."
+                        "NetBrain deep-offset HTTP 400."
                     ),
                 }
             )
@@ -780,23 +1041,14 @@ def oneip_lookup(
                 raw.append({"path": path, "params": params, "api_error": str(nb.last_error)})
             break
 
-        api_error = api_status_error(result)
-        records = records_from(result) if not api_error else []
+        records = records_from(result)
         matches = filter_target_records(records, target)
         entry = {"path": path, "params": params, "record_count": len(records)}
-        if api_error:
-            entry["api_error"] = api_error
+        if error := api_status_error(result):
+            entry["api_error"] = error
         raw.append(entry)
 
-        if nb.verbose:
-            status = ci_get(result, "statusCode") if isinstance(result, dict) else "unavailable"
-            description = ci_get(result, "statusDescription") if isinstance(result, dict) else ""
-            debug(
-                f"One-IP scan beginIndex={begin}: rows={len(records)}, matches={len(matches)}, "
-                f"statusCode={status}, description={description or 'N/A'}"
-            )
-
-        if api_error or not records:
+        if not records:
             break
 
         signature = json.dumps(records, sort_keys=True, ensure_ascii=False)
@@ -805,7 +1057,7 @@ def oneip_lookup(
                 {
                     "path": path,
                     "params": params,
-                    "scan_warning": "NetBrain returned the same One-IP page twice; scan stopped safely.",
+                    "lookup_error": "NetBrain returned the same page twice; scan stopped before completion.",
                 }
             )
             break
@@ -817,11 +1069,10 @@ def oneip_lookup(
                 return rows, raw
 
         last_page = result
-        if len(records) < page_size:
-            break
         begin += len(records)
 
     return [], raw
+
 
 def scan_oneip_after_id(
     nb: NetBrain,
@@ -934,6 +1185,10 @@ def after_id_cursor(
                 return str(value).strip(), str(key), fields
     return "", "", fields
 
+
+# ============================================================================
+# SECTION 11 - RESULT PARSING, NORMALIZATION, AND CORRELATION
+# ============================================================================
 
 def filter_target_records(records: list[dict[str, Any]], target: dict[str, str]) -> list[dict[str, Any]]:
     wanted = normalize_mac(target["value"]) if target["type"] == "MAC" else clean(target["value"])
@@ -1164,6 +1419,10 @@ def stringify(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False) if isinstance(value, (dict, list)) else str(value)
 
 
+# ============================================================================
+# SECTION 12 - CSV AND TERMINAL OUTPUT
+# ============================================================================
+
 def write_csv(path: Path, rows: list[dict[str, str]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8-sig") as handle:
@@ -1234,6 +1493,10 @@ def report_error(message: str, code: int) -> int:
     say(message, error=True)
     return code
 
+
+# ============================================================================
+# SECTION 13 - PROGRAM ENTRY POINT AND ERROR HANDLING
+# ============================================================================
 
 if __name__ == "__main__":
     try:
