@@ -12,7 +12,7 @@ Author:
     Peskicorp
 
 Version:
-    2.5.0
+    2.6.0
 
 Requirements:
     Python 3.10+
@@ -24,6 +24,13 @@ Installation:
 Security / Sanitization:
     This source file contains no production server names, usernames, passwords,
     tenant/domain names, IP addresses, MAC addresses, serial numbers, or site names.
+    Version 2.6 lookup strategy:
+        IPv4       : direct One-IP ``ip`` filter
+        MAC        : direct One-IP ``mac`` filter using dotted-lower format
+                     (example: aaaa.aaaa.aaaa)
+        MAC miss   : optional verification by ``switch_name`` partitions
+        Global scan: never used automatically for MAC targets
+
     Documentation examples use reserved/generic values only:
         NetBrain URL : https://netbrain.example.local
         IPv4 pattern : 192.168.1.X
@@ -50,6 +57,8 @@ Code Sections:
     08 - Target loading, validation, and normalization
     09 - Endpoint lookup orchestration
     10 - One-IP Table lookup, diagnostics, and pagination
+         Direct MAC lookup: Cisco dotted-lower format
+         MAC fallback: switch_name partition verification
     11 - Result parsing and correlation
     12 - CSV and terminal output
     13 - Program entry point and error handling
@@ -91,7 +100,8 @@ except ImportError:
 SESSION = "/ServicesAPI/API/V1/Session"
 DEFAULT_OUTPUT = "netbrain_endpoint_report.csv"
 ONEIP_DEEP_OFFSET_LIMIT = 20000
-VERSION = "NetBrain Endpoint Lookup 2.5.0"
+DEFAULT_MAC_QUERY_STYLE = "dotted-lower"
+VERSION = "NetBrain Endpoint Lookup 2.6.0"
 console = Console(markup=False) if Console else None
 DEFAULT_ENDPOINTS = [
     "/ServicesAPI/API/V1/CMDB/Devices/ConnectedSwitchPorts",
@@ -123,6 +133,7 @@ COLS = [
     "target",
     "target_type",
     "status",
+    "lookup_method",
     "endpoint_ip",
     "endpoint_mac",
     "endpoint_name",
@@ -199,18 +210,15 @@ class NetBrain:
         self.headers = {"Content-Type": "application/json", "Accept": "application/json"}
         self.last_error: Exception | None = None
 
-        # Capability/cache state for NetBrain releases where the One-IP Table
-        # documents a ``mac`` filter but the deployed API rejects it with HTTP 400.
-        # In that case we transparently build a bounded One-IP cache once and
-        # reuse it for every MAC target instead of failing every lookup.
+        # One-IP MAC behavior discovered during diagnostics.  The production
+        # environment validated for v2.6 uses Cisco dotted-lower notation.
+        # ``--mac-style auto`` remains available for portability to other
+        # NetBrain deployments without changing the source code.
+        self.mac_query_style = args.mac_style
         self.oneip_mac_filter_supported: bool | None = None
-        # Once a MAC representation is proven to return an exact match, reuse
-        # that representation first for later targets. This avoids up to eight
-        # trial requests per MAC on NetBrain deployments that are format-strict.
-        self.oneip_mac_preferred_style: str | None = None
-        self.oneip_cache: list[dict[str, Any]] | None = None
-        self.oneip_cache_complete = False
-        self.oneip_cache_warning = ""
+        self.oneip_mac_preferred_style: str | None = (
+            None if args.mac_style == "auto" else args.mac_style
+        )
 
     # -------------------------------------------------------------------------
     # AUTHENTICATION - REQUESTING TOKEN
@@ -425,6 +433,15 @@ def main() -> int:
             say("    Token  : Received", style="green")
             select_domain(nb, args.tenant, args.domain)
             say(f"[+] Searching {len(valid_targets)} endpoint(s)...", style="green")
+            say("    IP lookup     : Direct One-IP filter", style="green")
+            say(f"    MAC lookup    : Direct One-IP ({args.mac_style})", style="green")
+            say(
+                "    MAC fallback  : " + ("Switch partitions" if not args.no_switch_fallback else "Disabled"),
+                style="green",
+            )
+
+            # Phase 1: fast direct lookups.  No global One-IP scan is performed
+            # automatically for MAC targets in v2.6.
             for target in targets:
                 if target["type"] == "INVALID":
                     rows.append(invalid_row(target))
@@ -438,19 +455,35 @@ def main() -> int:
                     scan_oneip=args.oneip_scan and not args.no_oneip_scan,
                     oneip_count=args.oneip_count,
                 )
-                for result_row in target_rows:
-                    if result_row["status"] in {"not-found", "error"} and result_row.get("notes"):
-                        say(f"[WARN] {target['value']}: {result_row['notes']}", style="yellow")
                 rows.extend(target_rows)
                 raw.append({"target": target["value"], "responses": target_raw})
                 if args.verbose:
                     debug("Endpoint lookup completed")
+
+            # Correlate MAC targets against IP results from the same input before
+            # invoking the more expensive switch-partition verification.
+            correlate_mac_targets(rows)
+
+            # Phase 2: one reusable switch-partition pass resolves every direct
+            # MAC miss together. This avoids one full fallback scan per target.
+            if not args.no_switch_fallback:
+                fallback_raw, fallback_stats = resolve_mac_misses_by_switch_partitions(
+                    nb, rows, page_size=args.oneip_count
+                )
+                if fallback_raw:
+                    raw.append({"switch_partition_fallback": fallback_raw})
+                if fallback_stats.get("requested", 0):
+                    say("[+] Switch-partition MAC verification", style="green")
+                    say(f"    Direct misses      : {fallback_stats['requested']}")
+                    say(f"    Candidate switches : {fallback_stats['switches']}")
+                    say(f"    Switches scanned   : {fallback_stats['scanned']}")
+                    say(f"    Resolved           : {fallback_stats['resolved']}", style="green")
+                    say(f"    Still not found    : {fallback_stats['remaining']}", style="yellow" if fallback_stats['remaining'] else "green")
         finally:
             nb.logout()
     else:
         rows.extend(invalid_row(target) for target in targets)
 
-    correlate_mac_targets(rows)
     rows = [{column: row.get(column) or "N/A" for column in COLS} for row in rows]
     output = Path(args.output or DEFAULT_OUTPUT)
     write_csv(output, rows)
@@ -465,7 +498,12 @@ def main() -> int:
         else "[+] Lookup completed successfully.",
         style="yellow" if has_errors else "green",
     )
+    direct_mac = sum(row.get("lookup_method") == "DIRECT_MAC" and row["status"] == "found" for row in rows)
+    partition_mac = sum(row.get("lookup_method") == "SWITCH_PARTITION" and row["status"] == "found" for row in rows)
     say(f"[+] Endpoints found : {found}", style="green")
+    if direct_mac or partition_mac:
+        say(f"    Direct MAC      : {direct_mac}", style="green")
+        say(f"    Switch fallback : {partition_mac}", style="green")
     say(f"[+] CSV report      : {output.resolve()}", style="green")
     return 5 if has_errors else 0
 
@@ -489,6 +527,7 @@ EXAMPLES
   python netbrain_endpoint_lookup.py --url https://netbrain.example.local --hosts-file hosts.txt --insecure
   python netbrain_endpoint_lookup.py --url https://netbrain.example.local --hosts-file hosts.txt --user USERNAME --insecure
   python netbrain_endpoint_lookup.py --url https://netbrain.example.local --hosts-file hosts.txt --output endpoints.csv
+  python netbrain_endpoint_lookup.py --url https://netbrain.example.local --hosts-file hosts.txt --mac-style dotted-lower
 
   # One-IP Table diagnostic mode (no endpoint target required)
   python netbrain_endpoint_lookup.py --url https://netbrain.example.local --oneip-info --insecure --user USERNAME"""
@@ -533,16 +572,37 @@ EXAMPLES
         action="store_true",
         help=(
             "Run a sanitized One-IP Table diagnostic: inspect total-count metadata, "
-            "the 20,000-row offset boundary, and afterId cursor support. No host target required."
+            "the 20,000-row offset boundary, MAC filter formats, switch partitions, and cursor support. No host target required."
         ),
     )
     advanced.add_argument("--endpoint-path", action="append", help="Additional switch-port endpoint to try")
     advanced.add_argument(
+        "--mac-style",
+        choices=[
+            "dotted-lower", "dotted-upper",
+            "colon-lower", "colon-upper",
+            "hyphen-lower", "hyphen-upper",
+            "compact-lower", "compact-upper",
+            "auto",
+        ],
+        default=DEFAULT_MAC_QUERY_STYLE,
+        help=(
+            "MAC notation sent to NetBrain One-IP queries. Default: dotted-lower "
+            "(aaaa.aaaa.aaaa), selected from prior sanitized diagnostics. "
+            "Use auto only when testing another deployment."
+        ),
+    )
+    advanced.add_argument(
+        "--no-switch-fallback",
+        action="store_true",
+        help="Disable switch_name partition verification for direct MAC misses",
+    )
+    advanced.add_argument(
         "--oneip-scan",
         action="store_true",
         help=(
-            "Fallback: scan the One-IP Table when exact ip/mac lookup returns no match. "
-            "Disabled by default because large tables may reject deep offsets."
+            "Optional global One-IP scan after an exact IP miss. In v2.6 this "
+            "is not used automatically for MAC targets."
         ),
     )
     advanced.add_argument(
@@ -742,6 +802,7 @@ def make_target(raw: str) -> dict[str, str]:
 
 def invalid_row(target: dict[str, str]) -> dict[str, str]:
     row = empty_row(target, "error")
+    row["lookup_method"] = "INVALID"
     row["notes"] = "Invalid target"
     return row
 
@@ -857,6 +918,7 @@ def lookup(
         dict.fromkeys(item.get("scan_warning") for item in raw if item.get("scan_warning"))
     )
     row = empty_row(target, "error" if errors else "not-found")
+    row["lookup_method"] = "DIRECT_MAC" if target["type"] == "MAC" else "DIRECT_IP"
     if errors:
         row["notes"] = "One-IP lookup incomplete: " + "; ".join(errors)
     elif warnings:
@@ -1416,82 +1478,244 @@ def _is_invalid_mac_filter_error(exc: Exception | None) -> bool:
     return "parameter 'mac' is invalid" in message or 'parameter "mac" is invalid' in message
 
 
-def _build_oneip_cache(
-    nb: NetBrain, path: str, page_size: int
-) -> tuple[list[dict[str, Any]], bool, str]:
-    """Build a reusable, bounded One-IP cache for MAC fallback lookups.
+def _device_flat(record: dict[str, Any]) -> dict[str, str]:
+    """Flatten one NetBrain device record for inventory lookups."""
+    return {clean(k): stringify(v).strip() for k, v in flatten(record).items()}
 
-    Some NetBrain installations are strict about ``?mac=...`` notation or do
-    not return an exact match for every representation.  Scanning once and caching the result avoids repeating a large
-    table walk for every MAC address.  The scan stops before the known deep
-    offset boundary so it does not generate the HTTP 400 seen in older code.
+
+def _device_hostname(record: dict[str, Any]) -> str:
+    flat = _device_flat(record)
+    return pick(flat, ["hostname", "name", "devicename"])
+
+
+def _is_switch_device(record: dict[str, Any]) -> bool:
+    """Return whether a CMDB device is a plausible Layer-2 switch partition.
+
+    NetBrain device subtype names normally contain ``Switch``. Extra platform
+    keywords keep the fallback useful when a driver uses a vendor/platform name
+    instead of the literal word.
     """
-    if nb.oneip_cache is not None:
-        return nb.oneip_cache, nb.oneip_cache_complete, nb.oneip_cache_warning
-
-    cache: list[dict[str, Any]] = []
-    begin = 0
-    seen_pages: set[str] = set()
-    warning = ""
-    complete = False
-
-    say(
-        "[+] Direct One-IP MAC lookup did not resolve the target; "
-        "building a reusable One-IP cache...",
-        style="yellow",
+    flat = _device_flat(record)
+    type_text = " ".join(
+        filter(
+            None,
+            [
+                pick(flat, ["subtypename", "devicetypename", "drivertype", "drivername", "type"]),
+                pick(flat, ["vendor"]),
+                pick(flat, ["model", "platform"]),
+            ],
+        )
+    ).casefold()
+    keywords = (
+        "switch", "nexus", "catalyst", "arista", "brocade", "extreme",
+        "procurve", "comware", "fabric switch", "ethernet switch",
     )
+    return any(keyword in type_text for keyword in keywords)
 
-    while begin < ONEIP_DEEP_OFFSET_LIMIT:
-        fetch_count = min(page_size, ONEIP_DEEP_OFFSET_LIMIT - begin)
-        params = {"ip": "", "beginIndex": begin, "count": fetch_count}
+
+def _load_device_inventory(
+    nb: NetBrain,
+) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Read CMDB devices once and return hostname map, switch candidates, raw summaries."""
+    path = "/ServicesAPI/API/V1/CMDB/Devices"
+    inventory: dict[str, dict[str, Any]] = {}
+    devices: list[dict[str, Any]] = []
+    raw: list[dict[str, Any]] = []
+    skip = 0
+    limit = 100
+    seen_pages: set[str] = set()
+
+    while True:
+        params = {"version": 1, "fullattr": 1, "skip": skip, "limit": limit}
         result = nb.try_call("GET", path, params=params)
-
-        if not result:
-            warning = f"One-IP fallback scan stopped at row {begin}: {nb.last_error or 'empty response'}"
-            break
-
-        api_error = api_status_error(result)
-        if api_error:
-            warning = f"One-IP fallback scan stopped at row {begin}: {api_error}"
+        if result is None:
+            raw.append({"path": path, "params": params, "api_error": str(nb.last_error or "unknown error")})
             break
 
         records = records_from(result)
+        raw.append({"path": path, "params": params, "record_count": len(records)})
         if not records:
-            complete = True
             break
 
         signature = json.dumps(records, sort_keys=True, ensure_ascii=False)
         if signature in seen_pages:
-            warning = "NetBrain returned the same One-IP page twice; fallback scan stopped safely."
+            raw.append({"path": path, "lookup_error": "Device inventory pagination repeated a page."})
             break
         seen_pages.add(signature)
 
-        cache.extend(records)
-        begin += len(records)
+        for record in records:
+            hostname = _device_hostname(record)
+            if hostname:
+                inventory.setdefault(clean(hostname), record)
+                devices.append(record)
 
-        if nb.verbose and (begin % 5000 == 0 or len(records) < fetch_count):
-            debug(f"One-IP MAC fallback cache: {begin} row(s) loaded")
-
-        if len(records) < fetch_count:
-            complete = True
+        skip += len(records)
+        if len(records) < limit:
             break
 
-    if not complete and not warning and begin >= ONEIP_DEEP_OFFSET_LIMIT:
-        warning = (
-            f"One-IP MAC fallback scanned the first {ONEIP_DEEP_OFFSET_LIMIT} rows. "
-            "This NetBrain deployment rejects the MAC query parameter and also limits deep offset paging; "
-            "MACs outside the cached range may remain unresolved."
-        )
+    switches = [record for record in devices if _is_switch_device(record)]
+    # If NetBrain's device drivers do not label switches clearly, using the
+    # complete device inventory is safer than silently disabling the fallback.
+    if not switches:
+        switches = devices
+    return inventory, switches, raw
 
-    nb.oneip_cache = cache
-    nb.oneip_cache_complete = complete
-    nb.oneip_cache_warning = warning
 
-    say(f"    One-IP cache : {len(cache)} row(s)", style="green")
-    if warning:
-        say(f"    Cache note   : {warning}", style="yellow")
+def _extract_record_macs(record: dict[str, Any]) -> set[str]:
+    """Extract normalized MAC addresses from fields whose names indicate MAC."""
+    values: set[str] = set()
+    for key, value in flatten(record).items():
+        if "mac" not in clean(str(key)):
+            continue
+        for candidate in MAC_RE.findall(stringify(value)):
+            try:
+                values.add(normalize_mac(candidate))
+            except ValueError:
+                continue
+    return values
 
-    return cache, complete, warning
+
+def _enrich_switch_metadata(row: dict[str, str], device: dict[str, Any] | None) -> None:
+    """Add switch management IP/site/location without changing endpoint identity."""
+    if not device:
+        return
+    flat = _device_flat(device)
+    row["switch_ip"] = row.get("switch_ip") or pick(
+        flat, ["mgmtip", "managementip", "managementaddress", "deviceip"]
+    )
+    row["site"] = row.get("site") or pick(flat, ["site", "sitepath"])
+    row["location"] = row.get("location") or pick(flat, ["loc", "location"])
+
+
+def resolve_mac_misses_by_switch_partitions(
+    nb: NetBrain,
+    rows: list[dict[str, str]],
+    *,
+    page_size: int = 1000,
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """Verify all unresolved MAC targets by partitioning One-IP on switch_name.
+
+    The direct dotted-lower MAC filter is the primary lookup in v2.6. This
+    function is only invoked for remaining MAC misses. It enumerates CMDB switch
+    devices once, queries each switch partition, and resolves *all* outstanding
+    MACs in the same pass. No global 20,000-row MAC cache is used.
+    """
+    unresolved_rows: dict[str, list[dict[str, str]]] = {}
+    for row in rows:
+        if row.get("target_type") != "MAC" or row.get("status") == "found":
+            continue
+        try:
+            mac = normalize_mac(row.get("target", ""))
+        except ValueError:
+            continue
+        unresolved_rows.setdefault(mac, []).append(row)
+
+    stats = {"requested": len(unresolved_rows), "switches": 0, "scanned": 0, "resolved": 0, "remaining": 0}
+    raw: list[dict[str, Any]] = []
+    if not unresolved_rows:
+        return raw, stats
+
+    inventory, switch_devices, inventory_raw = _load_device_inventory(nb)
+    raw.extend(inventory_raw)
+
+    # Unique switch names, preserving CMDB order.
+    candidates: list[str] = []
+    seen_names: set[str] = set()
+    for device in switch_devices:
+        name = _device_hostname(device)
+        key = clean(name)
+        if name and key not in seen_names:
+            seen_names.add(key)
+            candidates.append(name)
+
+    stats["switches"] = len(candidates)
+    path = "/ServicesAPI/API/V1/CMDB/Topology/OneIPTable"
+    count = max(1, min(page_size, 1000))
+
+    for switch_name in candidates:
+        if not unresolved_rows:
+            break
+        stats["scanned"] += 1
+        begin = 0
+        seen_pages: set[str] = set()
+
+        while begin < ONEIP_DEEP_OFFSET_LIMIT and unresolved_rows:
+            params = {"switch_name": switch_name, "beginIndex": begin, "count": count}
+            result = nb.try_call("GET", path, params=params)
+            if result is None:
+                raw.append(
+                    {
+                        "path": path,
+                        "params": {"switch_name": "<redacted>", "beginIndex": begin, "count": count},
+                        "api_error": str(nb.last_error or "unknown error"),
+                    }
+                )
+                break
+
+            records = records_from(result)
+            raw.append(
+                {
+                    "path": path,
+                    "params": {"switch_name": "<redacted>", "beginIndex": begin, "count": count},
+                    "record_count": len(records),
+                }
+            )
+            if not records:
+                break
+
+            signature = json.dumps(records, sort_keys=True, ensure_ascii=False)
+            if signature in seen_pages:
+                raw.append({"path": path, "lookup_error": "Switch partition repeated a page."})
+                break
+            seen_pages.add(signature)
+
+            for record in records:
+                matches = _extract_record_macs(record) & set(unresolved_rows)
+                for mac in list(matches):
+                    target = {"type": "MAC", "value": mac, "original": mac}
+                    candidate_rows = useful_rows(target, [record], path)
+                    if not candidate_rows:
+                        continue
+                    resolved = candidate_rows[0]
+                    resolved["lookup_method"] = "SWITCH_PARTITION"
+                    switch_key = clean(resolved.get("switch_name") or switch_name)
+                    _enrich_switch_metadata(resolved, inventory.get(switch_key))
+                    resolved["notes"] = "Verified by switch_name partition fallback after direct MAC miss."
+                    for original_row in unresolved_rows[mac]:
+                        original_row.update(resolved)
+                        original_row["target"] = mac
+                        original_row["target_type"] = "MAC"
+                        original_row["status"] = "found"
+                    del unresolved_rows[mac]
+                    stats["resolved"] += 1
+
+            begin += len(records)
+            if len(records) < count:
+                break
+
+        if begin >= ONEIP_DEEP_OFFSET_LIMIT and unresolved_rows:
+            raw.append(
+                {
+                    "path": path,
+                    "pagination_warning": (
+                        "A single switch partition reached the 20,000-row safety boundary."
+                    ),
+                }
+            )
+
+    # Remaining rows are true direct misses that were also not seen in the
+    # verified switch partitions. Keep NOT FOUND (or ERROR when a prior API
+    # error was recorded) and document the verification method in the CSV.
+    for mac, target_rows in unresolved_rows.items():
+        for row in target_rows:
+            if row.get("status") != "error":
+                row["status"] = "not-found"
+            row["lookup_method"] = row.get("lookup_method") or "DIRECT_MAC"
+            note = "Direct MAC lookup and switch-partition verification returned no exact match."
+            row["notes"] = "; ".join(filter(None, (row.get("notes", ""), note)))
+
+    stats["remaining"] = len(unresolved_rows)
+    return raw, stats
 
 
 def oneip_lookup(
@@ -1499,17 +1723,20 @@ def oneip_lookup(
 ) -> tuple[list[dict[str, str]], list[dict[str, Any]]]:
     """Lookup an IP or MAC in NetBrain's One-IP Table.
 
-    IP lookups use the indexed ``ip`` parameter.  MAC lookups first try the
-    documented ``mac`` parameter.  If the deployed NetBrain API rejects that
-    parameter, the code automatically falls back to a reusable One-IP cache
-    instead of marking every MAC as an API error.
+    v2.6 behavior:
+      * IP  -> exact server-side ``ip`` filter.
+      * MAC -> exact server-side ``mac`` filter. The default representation is
+               Cisco dotted-lower (``aaaa.aaaa.aaaa``), verified by diagnostics.
+      * A MAC miss returns immediately to the caller so the batch-level
+        switch_name partition fallback can verify all misses together.
+      * The global 20,000-row scan is never invoked automatically for MACs.
     """
     path = "/ServicesAPI/API/V1/CMDB/Topology/OneIPTable"
     page_size = max(1, min(count, 1000))
     raw: list[dict[str, Any]] = []
 
     # ------------------------------------------------------------------
-    # Fast exact lookup
+    # DIRECT IP LOOKUP
     # ------------------------------------------------------------------
     if target["type"] == "IP":
         params = {"ip": target["value"], "beginIndex": 0, "count": page_size}
@@ -1527,37 +1754,38 @@ def oneip_lookup(
 
         if nb.verbose:
             debug(
-                f"One-IP exact query (ip={target['value']}): "
-                f"records={len(candidates)}, matches={len(records)}"
+                f"One-IP exact IP query: records={len(candidates)}, matches={len(records)}"
             )
 
         if records:
             rows = useful_rows(target, records, path)
+            for row in rows:
+                row["lookup_method"] = "DIRECT_IP"
             if rows:
                 return rows, raw
 
         if not scan:
             return [], raw
 
+    # ------------------------------------------------------------------
+    # DIRECT MAC LOOKUP
+    # ------------------------------------------------------------------
     else:
-        # Try every common MAC representation.  IMPORTANT: HTTP 400 for one
-        # representation does not mean the `mac` filter itself is unsupported;
-        # R12.x deployments may simply reject that notation.  Continue testing
-        # the remaining representations and remember the first style that
-        # produces an exact MAC match.
-        accepted_any = False
-        exact_query_succeeded = False
-        variants = mac_query_variants(target["value"], nb.oneip_mac_preferred_style)
+        if nb.mac_query_style == "auto":
+            variants = mac_query_variants(target["value"], nb.oneip_mac_preferred_style)
+        else:
+            variants = [(nb.mac_query_style, format_mac(target["value"], nb.mac_query_style))]
 
+        accepted_any = False
         for style, value in variants:
             params = {"mac": value, "beginIndex": 0, "count": page_size}
             result = nb.try_call("GET", path, params=params)
 
-            if result:
+            if result is not None:
                 accepted_any = True
                 candidates = records_from(result)
                 records = filter_target_records(candidates, target)
-                entry = {
+                entry: dict[str, Any] = {
                     "path": path,
                     "params": {"mac": f"<{style}>", "beginIndex": 0, "count": page_size},
                     "response": result,
@@ -1568,21 +1796,28 @@ def oneip_lookup(
 
                 if nb.verbose:
                     debug(
-                        f"One-IP MAC query style={style}: "
+                        f"One-IP direct MAC style={style}: "
                         f"records={len(candidates)}, exact_matches={len(records)}"
                     )
 
                 if records:
                     nb.oneip_mac_filter_supported = True
                     nb.oneip_mac_preferred_style = style
-                    exact_query_succeeded = True
                     rows = useful_rows(target, records, path)
+                    for row in rows:
+                        row["lookup_method"] = "DIRECT_MAC"
                     if rows:
                         return rows, raw
-                # Accepted but not an exact match: keep trying other formats.
+
+                # In fixed-style mode, HTTP 200 with no exact match is a true
+                # server-side miss. Do not waste calls on alternate notations.
+                if nb.mac_query_style != "auto":
+                    break
                 continue
 
-            if _is_invalid_mac_filter_error(nb.last_error):
+            # In auto mode only, notation-specific HTTP 400 is allowed to move
+            # to the next representation. Other errors are preserved.
+            if nb.mac_query_style == "auto" and _is_invalid_mac_filter_error(nb.last_error):
                 raw.append(
                     {
                         "path": path,
@@ -1590,8 +1825,6 @@ def oneip_lookup(
                         "capability_warning": f"MAC representation {style} rejected by NetBrain.",
                     }
                 )
-                if nb.verbose:
-                    debug(f"One-IP MAC representation rejected: {style}")
                 continue
 
             if nb.last_error:
@@ -1602,50 +1835,15 @@ def oneip_lookup(
                         "api_error": str(nb.last_error),
                     }
                 )
+            break
 
-        if exact_query_succeeded:
-            nb.oneip_mac_filter_supported = True
-        else:
-            # No representation produced an exact server-side result.  A
-            # bounded fallback is safer than incorrectly reporting NOT FOUND.
-            nb.oneip_mac_filter_supported = False
-            reason = (
-                "NetBrain accepted one or more MAC queries but none returned an exact match; "
-                "using fallback lookup."
-                if accepted_any
-                else
-                "NetBrain rejected all tested MAC representations; using fallback lookup."
-            )
-            raw.append({"path": path, "capability_warning": reason})
-
-        # Automatic compatibility fallback.  This is intentionally enabled for
-        # MAC targets when the live server rejects the MAC query parameter.
-        if nb.oneip_mac_filter_supported is False:
-            cache, complete, warning = _build_oneip_cache(nb, path, page_size)
-            matches = filter_target_records(cache, target)
-            raw.append(
-                {
-                    "path": path,
-                    "fallback": "cached-oneip-scan",
-                    "cached_rows": len(cache),
-                    "cache_complete": complete,
-                }
-            )
-            if warning:
-                raw.append({"path": path, "scan_warning": warning})
-            if matches:
-                rows = useful_rows(target, matches, path)
-                if rows:
-                    return rows, raw
-            return [], raw
-
-        if not scan:
-            return [], raw
+        nb.oneip_mac_filter_supported = accepted_any
+        # Return the miss. The batch-level switch partition fallback handles it
+        # once all direct targets have completed.
+        return [], raw
 
     # ------------------------------------------------------------------
-    # Optional generic full scan (mainly useful for an IP exact miss).
-    # MACs normally reach this block only when the server accepted ``mac`` but
-    # returned no match and the user explicitly supplied --oneip-scan.
+    # OPTIONAL GLOBAL SCAN FOR IP MISSES ONLY
     # ------------------------------------------------------------------
     begin = 0
     seen_pages: set[str] = set()
@@ -1667,7 +1865,7 @@ def oneip_lookup(
                     "path": path,
                     "params": {"ip": "", "beginIndex": begin, "count": page_size},
                     "scan_warning": (
-                        f"One-IP fallback scan stopped at {ONEIP_DEEP_OFFSET_LIMIT} rows to avoid "
+                        f"One-IP optional IP scan stopped at {ONEIP_DEEP_OFFSET_LIMIT} rows to avoid "
                         "NetBrain deep-offset HTTP 400."
                     ),
                 }
@@ -1705,6 +1903,8 @@ def oneip_lookup(
 
         if matches:
             rows = useful_rows(target, matches, path)
+            for row in rows:
+                row["lookup_method"] = "GLOBAL_IP_SCAN"
             if rows:
                 return rows, raw
 
@@ -1905,7 +2105,7 @@ def correlate_mac_targets(rows: list[dict[str, str]]) -> None:
         if not match:
             continue
         resolved = merge_rows(match, row)
-        resolved.update({"target": row["target"], "target_type": "MAC", "status": "found"})
+        resolved.update({"target": row["target"], "target_type": "MAC", "status": "found", "lookup_method": "IP_CORRELATION"})
         resolved["endpoint_mac"] = normalize_mac(row["target"])
         note = "MAC correlacionada con un resultado IP del mismo archivo"
         resolved["notes"] = "; ".join(filter(None, (resolved["notes"], note)))
@@ -1966,6 +2166,12 @@ def row_from(target: dict[str, str], rec: dict[str, Any], status: str, source: s
     }
     row = empty_row(target, status)
     row["source_api"] = source
+    if "OneIPTable" in source:
+        row["lookup_method"] = "DIRECT_MAC" if target["type"] == "MAC" else "DIRECT_IP"
+    elif "ConnectedSwitchPort" in source:
+        row["lookup_method"] = "CONNECTED_SWITCH_PORT"
+    elif source.endswith("/CMDB/Devices"):
+        row["lookup_method"] = "DEVICE_LOOKUP"
     for col, aliases in ALIASES.items():
         row[col] = pick(flat, aliases)
     if row["switch_port"]:
@@ -2012,6 +2218,8 @@ def split_switch_port(value: str) -> tuple[str, str]:
 def empty_row(target: dict[str, str], status: str) -> dict[str, str]:
     row = {col: "" for col in COLS}
     row.update({"target": target["value"], "target_type": target["type"], "status": status})
+    if status == "not-found":
+        row["lookup_method"] = "DIRECT_MAC" if target["type"] == "MAC" else "DIRECT_IP"
     return row
 
 
@@ -2095,6 +2303,7 @@ def display_results(rows: list[dict[str, str]]) -> None:
         ("Target", "target"),
         ("Type", "target_type"),
         ("Status", "status"),
+        ("Method", "lookup_method"),
         ("Endpoint IP", "endpoint_ip"),
         ("MAC Address", "endpoint_mac"),
         ("Hostname", "endpoint_name"),
