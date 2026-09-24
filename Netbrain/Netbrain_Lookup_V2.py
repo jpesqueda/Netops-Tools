@@ -12,7 +12,7 @@ Author:
     Peskicorp
 
 Version:
-    2.2.1
+    2.3.0
 
 Requirements:
     Python 3.10+
@@ -49,7 +49,7 @@ Code Sections:
     07 - Tenant and domain selection
     08 - Target loading, validation, and normalization
     09 - Endpoint lookup orchestration
-    10 - One-IP Table lookup and pagination
+    10 - One-IP Table lookup, diagnostics, and pagination
     11 - Result parsing and correlation
     12 - CSV and terminal output
     13 - Program entry point and error handling
@@ -91,7 +91,7 @@ except ImportError:
 SESSION = "/ServicesAPI/API/V1/Session"
 DEFAULT_OUTPUT = "netbrain_endpoint_report.csv"
 ONEIP_DEEP_OFFSET_LIMIT = 20000
-VERSION = "NetBrain Endpoint Lookup 2.2.1"
+VERSION = "NetBrain Endpoint Lookup 2.3.0"
 console = Console(markup=False) if Console else None
 DEFAULT_ENDPOINTS = [
     "/ServicesAPI/API/V1/CMDB/Devices/ConnectedSwitchPorts",
@@ -348,6 +348,38 @@ def main() -> int:
     if args.insecure:
         say("[!] WARNING: SSL certificate verification is disabled.", style="yellow")
 
+    # ---------------------------------------------------------------------
+    # DIAGNOSTIC MODE - ONE-IP TABLE CAPABILITIES
+    # ---------------------------------------------------------------------
+    # This mode does not require --host or --hosts-file. It authenticates to
+    # NetBrain, inspects One-IP pagination behavior, and reports only metadata
+    # and counts. It intentionally does not print IPs, MACs, hostnames, or raw
+    # One-IP records.
+    if args.oneip_info:
+        url = (args.url or input("NetBrain URL: ")).strip().rstrip("/")
+        if not url:
+            say("[-] ERROR: NetBrain URL is required.", error=True)
+            return 2
+        user = args.username or input("NetBrain Username: ").strip()
+        password = args.password if args.password is not None else getpass.getpass("NetBrain Password: ")
+        nb = NetBrain(url, user, password, args)
+        try:
+            say("[+] Validating NetBrain connectivity...", style="green")
+            say(f"    URL    : {url}", style="green")
+            nb.validate_connection()
+            say("[+] Connecting to NetBrain API...", style="green")
+            nb.login()
+            say("    Login  : Successful", style="green")
+            say("    Token  : Received", style="green")
+            select_domain(nb, args.tenant, args.domain)
+            return run_oneip_diagnostics(nb, args.oneip_count)
+        finally:
+            nb.logout()
+
+    if args.host is None and args.hosts_file is None:
+        say("[-] ERROR: Use --host, --hosts-file, or --oneip-info.", error=True)
+        return 2
+
     if args.host is not None:
         target = make_target(args.host.strip())
         if target["type"] == "INVALID":
@@ -442,6 +474,7 @@ def parse_args() -> argparse.Namespace:
     examples = """USAGE
   python netbrain_endpoint_lookup.py --url URL --host TARGET
   python netbrain_endpoint_lookup.py --url URL --hosts-file FILE
+  python netbrain_endpoint_lookup.py --url URL --oneip-info
 
 EXAMPLES
   # Generic IPv4 example (192.168.1.X)
@@ -451,7 +484,10 @@ EXAMPLES
   python netbrain_endpoint_lookup.py --url https://netbrain.example.local --hosts-file hosts.txt
   python netbrain_endpoint_lookup.py --url https://netbrain.example.local --hosts-file hosts.txt --insecure
   python netbrain_endpoint_lookup.py --url https://netbrain.example.local --hosts-file hosts.txt --user USERNAME --insecure
-  python netbrain_endpoint_lookup.py --url https://netbrain.example.local --hosts-file hosts.txt --output endpoints.csv"""
+  python netbrain_endpoint_lookup.py --url https://netbrain.example.local --hosts-file hosts.txt --output endpoints.csv
+
+  # One-IP Table diagnostic mode (no endpoint target required)
+  python netbrain_endpoint_lookup.py --url https://netbrain.example.local --oneip-info --insecure --user USERNAME"""
     p = argparse.ArgumentParser(
         description=(
             "DESCRIPTION\n"
@@ -464,7 +500,7 @@ EXAMPLES
     p.add_argument("--version", action="version", version=f"{VERSION}\nAuthor: Peskicorp")
     inputs = p.add_argument_group("INPUT OPTIONS")
     inputs.add_argument("--url", help="NetBrain base URL, e.g. https://netbrain.example.local")
-    target_input = inputs.add_mutually_exclusive_group(required=True)
+    target_input = inputs.add_mutually_exclusive_group(required=False)
     target_input.add_argument("--host", help="Single IPv4 or MAC target; type is detected automatically")
     target_input.add_argument("--hosts-file", help="Text file with one or more IP/MAC targets")
 
@@ -488,6 +524,14 @@ EXAMPLES
     advanced = p.add_argument_group("NETBRAIN OPTIONS")
     advanced.add_argument("--tenant", help="Tenant name or ID")
     advanced.add_argument("--domain", help="Domain name or ID")
+    advanced.add_argument(
+        "--oneip-info",
+        action="store_true",
+        help=(
+            "Run a sanitized One-IP Table diagnostic: inspect total-count metadata, "
+            "the 20,000-row offset boundary, and afterId cursor support. No host target required."
+        ),
+    )
     advanced.add_argument("--endpoint-path", action="append", help="Additional switch-port endpoint to try")
     advanced.add_argument(
         "--oneip-scan",
@@ -797,6 +841,241 @@ def connected_switch_port_lookup(
 # ============================================================================
 # SECTION 10 - ONE-IP TABLE LOOKUP AND PAGINATION
 # ============================================================================
+
+def _find_oneip_total(response: Any) -> tuple[int | None, str]:
+    """Return a total-record counter from response metadata when one is exposed.
+
+    NetBrain releases are not fully consistent about metadata names. This
+    function checks common total-counter names while deliberately ignoring
+    One-IP record lists so a per-record value cannot be mistaken for the table
+    total.
+    """
+    wanted = {
+        "totalresultcount",
+        "totalcount",
+        "totalrecords",
+        "recordcount",
+        "rowcount",
+        "totalrows",
+        "totalsize",
+        "total",
+    }
+
+    def walk_dict(data: dict[str, Any], prefix: str = "") -> tuple[int | None, str]:
+        # First inspect scalar values at the current metadata level.
+        for key, value in data.items():
+            normalized = re.sub(r"[^a-z0-9]", "", str(key).casefold())
+            path = f"{prefix}.{key}" if prefix else str(key)
+            if normalized in wanted and isinstance(value, (int, str)) and not isinstance(value, bool):
+                try:
+                    number = int(value)
+                except (TypeError, ValueError):
+                    continue
+                if number >= 0:
+                    return number, path
+
+        # Recurse into metadata dictionaries only. Do not descend into lists of
+        # One-IP records because those contain operational network data.
+        for key, value in data.items():
+            if isinstance(value, dict):
+                path = f"{prefix}.{key}" if prefix else str(key)
+                found, found_path = walk_dict(value, path)
+                if found is not None:
+                    return found, found_path
+        return None, ""
+
+    if not isinstance(response, dict):
+        return None, ""
+    return walk_dict(response)
+
+
+def _oneip_response_keys(response: Any) -> str:
+    """Return only top-level response field names; never print record values."""
+    if not isinstance(response, dict):
+        return type(response).__name__
+    return ", ".join(sorted(str(key) for key in response.keys())) or "none"
+
+
+def _safe_oneip_request(
+    nb: NetBrain, path: str, params: dict[str, Any]
+) -> tuple[Any | None, list[dict[str, Any]], str]:
+    """Execute a diagnostic One-IP GET and return response, records, and error text."""
+    result = nb.try_call("GET", path, params=params)
+    if result is None:
+        return None, [], str(nb.last_error or "Unknown API error")
+    return result, records_from(result), ""
+
+
+def run_oneip_diagnostics(nb: NetBrain, requested_count: int) -> int:
+    """Inspect One-IP table size and pagination without exposing network records.
+
+    The diagnostic answers four questions:
+      1. Does the API expose an exact total record count?
+      2. Is record index 19,999 accessible?
+      3. What happens when beginIndex reaches 20,000?
+      4. Does the accessible response expose a usable afterId/cursor?
+
+    Only counts, response field names, and capability results are printed.
+    IP addresses, MAC addresses, hostnames, cursor values, and One-IP rows are
+    intentionally suppressed.
+    """
+    path = "/ServicesAPI/API/V1/CMDB/Topology/OneIPTable"
+    page_size = max(1, min(requested_count, 1000))
+
+    say("\n" + "=" * 68, style="green")
+    say("ONE-IP TABLE DIAGNOSTICS".center(68), style="green")
+    say("=" * 68, style="green")
+    say("[+] Reading One-IP metadata...", style="green")
+
+    first_params = {"ip": "", "beginIndex": 0, "count": page_size}
+    first, first_records, first_error = _safe_oneip_request(nb, path, first_params)
+    if first is None:
+        say("[-] Unable to read the first One-IP page.", style="red")
+        say(f"    Error : {first_error}", style="red")
+        return 5
+
+    say(f"    Requested rows     : {page_size}")
+    say(f"    Returned rows      : {len(first_records)}")
+    say(f"    Response fields    : {_oneip_response_keys(first)}")
+
+    total, total_field = _find_oneip_total(first)
+    if total is not None:
+        say(f"    Total One-IP rows  : {total:,}", style="green")
+        say(f"    Total count field  : {total_field}")
+    else:
+        say("    Total One-IP rows  : Not exposed in first-page metadata", style="yellow")
+
+    say("\n[+] Testing the 20,000-row offset boundary...", style="green")
+    before_params = {"ip": "", "beginIndex": ONEIP_DEEP_OFFSET_LIMIT - 1, "count": 1}
+    before, before_records, before_error = _safe_oneip_request(nb, path, before_params)
+    if before is not None:
+        say(
+            f"    beginIndex {ONEIP_DEEP_OFFSET_LIMIT - 1:,} : "
+            f"SUCCESS ({len(before_records)} row(s))",
+            style="green" if before_records else "yellow",
+        )
+    else:
+        say(
+            f"    beginIndex {ONEIP_DEEP_OFFSET_LIMIT - 1:,} : REJECTED",
+            style="yellow",
+        )
+        if nb.verbose:
+            debug(f"Boundary-1 error: {before_error}")
+
+    limit_params = {"ip": "", "beginIndex": ONEIP_DEEP_OFFSET_LIMIT, "count": 1}
+    limit_result, limit_records, limit_error = _safe_oneip_request(nb, path, limit_params)
+    if limit_result is not None:
+        say(
+            f"    beginIndex {ONEIP_DEEP_OFFSET_LIMIT:,} : "
+            f"SUCCESS ({len(limit_records)} row(s))",
+            style="green" if limit_records else "yellow",
+        )
+    else:
+        say(f"    beginIndex {ONEIP_DEEP_OFFSET_LIMIT:,} : REJECTED", style="yellow")
+        # The error text contains API behavior, not credentials. Show a compact
+        # classification in normal mode and the complete exception only in -v.
+        lower_error = limit_error.casefold()
+        if "afterid" in lower_error or "deep offset" in lower_error:
+            say("    Server behavior    : Deep-offset paging blocked; cursor paging requested", style="yellow")
+        else:
+            say("    Server behavior    : Offset request rejected", style="yellow")
+        if nb.verbose:
+            debug(f"Boundary error: {limit_error}")
+
+    # Fetch the last accessible 1,000-row window. This is the best place to
+    # discover a next-cursor or a row identifier before the offset restriction.
+    last_window_start = max(0, ONEIP_DEEP_OFFSET_LIMIT - 1000)
+    last_params = {"ip": "", "beginIndex": last_window_start, "count": 1000}
+    last_page, last_records, last_error = _safe_oneip_request(nb, path, last_params)
+
+    cursor = ""
+    cursor_field = ""
+    available_fields: list[str] = []
+    if last_page is not None:
+        cursor, cursor_field, available_fields = after_id_cursor(last_page, last_records)
+        say("\n[+] Inspecting cursor pagination support...", style="green")
+        say(f"    Last window start  : {last_window_start:,}")
+        say(f"    Last window rows   : {len(last_records)}")
+        if cursor:
+            say(f"    Cursor detected    : YES (field: {cursor_field})", style="green")
+        else:
+            say("    Cursor detected    : NO", style="yellow")
+            if last_records:
+                # Field NAMES are useful for engineering and do not disclose the
+                # actual operational values stored in the One-IP row.
+                fields = sorted(flatten(last_records[-1]).keys())
+                preview = ", ".join(fields[:24])
+                suffix = " ..." if len(fields) > 24 else ""
+                say(f"    Last-row fields    : {preview}{suffix}")
+            elif available_fields:
+                say(f"    Response fields    : {', '.join(available_fields[:24])}")
+    else:
+        say("\n[+] Inspecting cursor pagination support...", style="green")
+        say("    Last accessible window could not be read.", style="yellow")
+        if nb.verbose:
+            debug(f"Last-window error: {last_error}")
+
+    cursor_supported = False
+    cursor_rows = 0
+    if cursor:
+        # Never print the cursor value. Only test whether NetBrain accepts it.
+        cursor_params = {"ip": "", "afterId": cursor, "count": min(page_size, 10)}
+        cursor_result, cursor_records, cursor_error = _safe_oneip_request(nb, path, cursor_params)
+        if cursor_result is not None:
+            cursor_supported = True
+            cursor_rows = len(cursor_records)
+            say(f"    afterId test       : SUCCESS ({cursor_rows} row(s))", style="green")
+        else:
+            say("    afterId test       : REJECTED", style="yellow")
+            if nb.verbose:
+                debug(f"afterId test error: {cursor_error}")
+
+    # ------------------------------------------------------------------
+    # CONCLUSION
+    # ------------------------------------------------------------------
+    say("\n[+] Diagnostic conclusion", style="green")
+
+    if total is not None:
+        say(f"    Exact table size   : {total:,} row(s)", style="green")
+        if total > ONEIP_DEEP_OFFSET_LIMIT:
+            say(
+                f"    Rows beyond 20,000 : {total - ONEIP_DEEP_OFFSET_LIMIT:,}",
+                style="yellow",
+            )
+        else:
+            say("    Rows beyond 20,000 : 0")
+    elif limit_result is not None and limit_records:
+        say(
+            f"    Table size         : At least {ONEIP_DEEP_OFFSET_LIMIT + 1:,} rows",
+            style="yellow",
+        )
+        say("    Exact table size   : Unknown (no total-count metadata)", style="yellow")
+    elif limit_result is not None and not limit_records:
+        if before is not None and before_records:
+            say(f"    Table size         : Approximately {ONEIP_DEEP_OFFSET_LIMIT:,} rows")
+        else:
+            say(f"    Table size         : Fewer than {ONEIP_DEEP_OFFSET_LIMIT:,} rows")
+    elif before is not None and before_records:
+        say(
+            f"    Table size         : At least {ONEIP_DEEP_OFFSET_LIMIT:,} rows",
+            style="yellow",
+        )
+        say("    Exact table size   : Unknown because the server blocks deeper offsets", style="yellow")
+    else:
+        say("    Table size         : Could not be determined from offset tests", style="yellow")
+
+    if cursor_supported:
+        say("    Cursor paging      : SUPPORTED", style="green")
+        say("    Next engineering   : We can replace the 20,000-row cap with afterId pagination.", style="green")
+    elif cursor:
+        say("    Cursor paging      : Cursor field exists, but afterId request was rejected", style="yellow")
+    else:
+        say("    Cursor paging      : No usable cursor exposed in the tested response", style="yellow")
+        say("    Next engineering   : Inspect NetBrain version-specific pagination metadata/API behavior.", style="yellow")
+
+    say("\n[+] Diagnostic completed. No One-IP record values were printed.", style="green")
+    return 0
+
 
 def _is_invalid_mac_filter_error(exc: Exception | None) -> bool:
     """Return True when this NetBrain deployment rejects the One-IP ``mac`` filter."""
