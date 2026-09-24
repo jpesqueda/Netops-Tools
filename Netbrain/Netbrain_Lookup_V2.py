@@ -12,15 +12,14 @@ Author:
     Peskicorp
 
 Version:
-    2.0.5
+    2.1.0
 
 Requirements:
     Python 3.10+
-    requests
     rich
 
 Installation:
-    pip install requests rich
+    pip install rich
 """
 
 from __future__ import annotations
@@ -50,7 +49,8 @@ except ImportError:
 
 SESSION = "/ServicesAPI/API/V1/Session"
 DEFAULT_OUTPUT = "netbrain_endpoint_report.csv"
-VERSION = "NetBrain Endpoint Lookup 2.0.5"
+ONEIP_DEEP_OFFSET_LIMIT = 20000
+VERSION = "NetBrain Endpoint Lookup 2.1.0"
 console = Console(markup=False) if Console else None
 DEFAULT_ENDPOINTS = [
     "/ServicesAPI/API/V1/CMDB/Devices/ConnectedSwitchPorts",
@@ -315,7 +315,7 @@ def main() -> int:
                     nb,
                     target,
                     args.endpoint_path or DEFAULT_ENDPOINTS,
-                    scan_oneip=args.oneip_scan or not args.no_oneip_scan,
+                    scan_oneip=args.oneip_scan and not args.no_oneip_scan,
                     oneip_count=args.oneip_count,
                 )
                 for result_row in target_rows:
@@ -397,8 +397,19 @@ EXAMPLES
     advanced.add_argument("--tenant", help="Tenant name or ID")
     advanced.add_argument("--domain", help="Domain name or ID")
     advanced.add_argument("--endpoint-path", action="append", help="Additional switch-port endpoint to try")
-    advanced.add_argument("--oneip-scan", action="store_true", help="Compatibility option; One-IP scan is enabled by default")
-    advanced.add_argument("--no-oneip-scan", action="store_true", help="Disable full One-IP Table scan fallback")
+    advanced.add_argument(
+        "--oneip-scan",
+        action="store_true",
+        help=(
+            "Fallback: scan the One-IP Table when exact ip/mac lookup returns no match. "
+            "Disabled by default because large tables may reject deep offsets."
+        ),
+    )
+    advanced.add_argument(
+        "--no-oneip-scan",
+        action="store_true",
+        help="Compatibility flag; explicitly keep full One-IP Table scanning disabled",
+    )
     advanced.add_argument("--oneip-count", type=int, default=1000, help="Rows per One-IP Table page (max: 1000)")
     advanced.add_argument("--timeout", type=int, default=30, help="HTTP timeout in seconds (default: 30)")
     advanced.add_argument("-v", "--verbose", action="store_true", help="Show target and request diagnostics; secrets are omitted")
@@ -503,9 +514,34 @@ def normalize_mac(mac: str) -> str:
 
 
 def mac_query_values(mac: str) -> list[str]:
-    """Return the Cisco dotted MAC notation accepted by this One-IP API."""
-    digits = re.sub(r"[^0-9a-fA-F]", "", mac).upper()
-    return [f"{digits[:4]}.{digits[4:8]}.{digits[8:]}"]
+    """Return common MAC representations accepted by different NetBrain releases.
+
+    NetBrain documentation shows Cisco dotted notation, but real deployments may
+    normalize the same MAC differently.  Try the indexed ``mac`` query with a
+    small set of exact representations instead of scanning the complete One-IP
+    table.
+    """
+    digits = re.sub(r"[^0-9a-fA-F]", "", mac)
+    if len(digits) != 12:
+        return [mac]
+
+    dotted = f"{digits[:4]}.{digits[4:8]}.{digits[8:]}"
+    colon = ":".join(digits[i : i + 2] for i in range(0, 12, 2))
+    hyphen = "-".join(digits[i : i + 2] for i in range(0, 12, 2))
+    compact = digits
+
+    values = [
+        dotted.upper(),
+        dotted.lower(),
+        colon.upper(),
+        colon.lower(),
+        hyphen.upper(),
+        hyphen.lower(),
+        compact.upper(),
+        compact.lower(),
+    ]
+    # Preserve order while removing duplicates.
+    return list(dict.fromkeys(values))
 
 
 def make_target(raw: str) -> dict[str, str]:
@@ -626,9 +662,14 @@ def lookup(
             if item.get("api_error") or item.get("lookup_error")
         )
     )
+    warnings = list(
+        dict.fromkeys(item.get("scan_warning") for item in raw if item.get("scan_warning"))
+    )
     row = empty_row(target, "error" if errors else "not-found")
     if errors:
         row["notes"] = "One-IP lookup incomplete: " + "; ".join(errors)
+    elif warnings:
+        row["notes"] = "; ".join(warnings)
     return [row], raw
 
 
@@ -651,112 +692,136 @@ def connected_switch_port_lookup(
 def oneip_lookup(
     nb: NetBrain, target: dict[str, str], *, scan: bool, count: int
 ) -> tuple[list[dict[str, str]], list[dict[str, Any]]]:
+    """Lookup a target in NetBrain's One-IP Table.
+
+    The preferred path is always the server-side exact filter (``ip`` or
+    ``mac``).  A full table scan is only used when explicitly requested because
+    recent NetBrain backends can reject deep ``beginIndex`` offsets (commonly
+    at 20,000 rows) and the public One-IP payload does not necessarily expose a
+    usable row cursor.
+    """
     path = "/ServicesAPI/API/V1/CMDB/Topology/OneIPTable"
     query_key = "ip" if target["type"] == "IP" else "mac"
     query_values = [target["value"]] if target["type"] == "IP" else mac_query_values(target["value"])
     page_size = max(1, min(count, 1000))
     raw: list[dict[str, Any]] = []
 
+    # 1) Fast/indexed lookup.  This is the normal and recommended path.
     for value in query_values:
         params = {query_key: value, "beginIndex": 0, "count": page_size}
         result = nb.try_call("GET", path, params=params)
-        candidates = records_from(result) if result else []
-        records = filter_target_records(candidates, target)
+
         if result:
-            entry = {"path": path, "params": params, "response": result}
-            if error := api_status_error(result):
-                entry["api_error"] = error
+            api_error = api_status_error(result)
+            candidates = records_from(result) if not api_error else []
+            records = filter_target_records(candidates, target)
+            entry: dict[str, Any] = {"path": path, "params": params, "response": result}
+            if api_error:
+                entry["api_error"] = api_error
             raw.append(entry)
-        elif nb.last_error:
-            raw.append({"path": path, "params": params, "api_error": str(nb.last_error)})
+        else:
+            candidates = []
+            records = []
+            if nb.last_error:
+                raw.append({"path": path, "params": params, "api_error": str(nb.last_error)})
+
         if nb.verbose:
-            error = api_status_error(result) if result else ""
+            error = api_status_error(result) if result else str(nb.last_error or "")
             detail = f"; {error}" if error else ""
             keys = ",".join(str(key) for key in result) if isinstance(result, dict) else type(result).__name__
             debug(
-                f"One-IP query ({query_key}={value}): records={len(candidates)}, matches={len(records)}, "
-                f"response_keys={keys or 'none'}{detail}"
+                f"One-IP exact query ({query_key}={value}): records={len(candidates)}, "
+                f"matches={len(records)}, response_keys={keys or 'none'}{detail}"
             )
+
         if records:
             rows = useful_rows(target, records, path)
             if rows:
                 return rows, raw
 
+    # Do not turn a clean exact miss into a 20k-row table walk.
     if not scan:
         return [], raw
 
+    # 2) Optional compatibility scan.  Stop before NetBrain's deep-offset
+    # protection is triggered.  If a future release returns a top-level cursor,
+    # use it; otherwise return an incomplete-scan warning, not a hard API error.
     begin = 0
     seen_pages: set[str] = set()
-    last_record: dict[str, Any] | None = None
     last_page: Any = None
+
     while True:
+        if begin >= ONEIP_DEEP_OFFSET_LIMIT:
+            cursor, cursor_field, _ = after_id_cursor(last_page, [])
+            if cursor:
+                if nb.verbose:
+                    debug(
+                        f"One-IP offset limit reached at {begin}; resuming with "
+                        f"afterId from response metadata ({cursor_field})."
+                    )
+                return scan_oneip_after_id(nb, target, path, page_size, raw, cursor)
+
+            raw.append(
+                {
+                    "path": path,
+                    "params": {"ip": "", "beginIndex": begin, "count": page_size},
+                    "scan_warning": (
+                        f"One-IP fallback scan stopped at {ONEIP_DEEP_OFFSET_LIMIT} rows to avoid "
+                        "NetBrain deep-offset HTTP 400. Exact ip/mac lookup returned no match."
+                    ),
+                }
+            )
+            break
+
         params = {"ip": "", "beginIndex": begin, "count": page_size}
         result = nb.try_call("GET", path, params=params)
-        records = records_from(result) if result else []
+        if not result:
+            if nb.last_error:
+                raw.append({"path": path, "params": params, "api_error": str(nb.last_error)})
+            break
+
+        api_error = api_status_error(result)
+        records = records_from(result) if not api_error else []
         matches = filter_target_records(records, target)
-        if result:
-            entry = {"path": path, "params": params, "record_count": len(records)}
-            if error := api_status_error(result):
-                entry["api_error"] = error
-            raw.append(entry)
-        elif nb.last_error:
-            raw.append({"path": path, "params": params, "api_error": str(nb.last_error)})
+        entry = {"path": path, "params": params, "record_count": len(records)}
+        if api_error:
+            entry["api_error"] = api_error
+        raw.append(entry)
+
         if nb.verbose:
             status = ci_get(result, "statusCode") if isinstance(result, dict) else "unavailable"
             description = ci_get(result, "statusDescription") if isinstance(result, dict) else ""
             debug(
-                f"One-IP scan beginIndex={begin}: rows={len(records)}, matches={len(matches)}, statusCode={status}, "
-                f"description={description or 'N/A'}"
+                f"One-IP scan beginIndex={begin}: rows={len(records)}, matches={len(matches)}, "
+                f"statusCode={status}, description={description or 'N/A'}"
             )
-            if begin == 0 and records:
-                samples = mac_samples(records)
-                debug(f"One-IP first-page MAC samples: {', '.join(samples) or 'no MAC fields detected'}")
-        if not records:
-            error_text = str(nb.last_error or "")
-            if "afterid" in error_text.casefold():
-                cursor, cursor_field, available_fields = after_id_cursor(
-                    last_page, [last_record] if last_record else []
-                )
-                if cursor:
-                    for entry in reversed(raw):
-                        if entry.get("params") == params and entry.get("api_error"):
-                            entry["pagination_warning"] = entry.pop("api_error")
-                            break
-                    if nb.verbose:
-                        debug(f"Offset limit reached at {begin}; resuming One-IP scan with afterId ({cursor_field}).")
-                    return scan_oneip_after_id(nb, target, path, page_size, raw, cursor)
-                fields = ", ".join(available_fields) or "none"
-                raw.append(
-                    {
-                        "path": path,
-                        "params": params,
-                        "lookup_error": (
-                            "NetBrain requires afterId cursor paging beyond this offset, but no row ID/cursor "
-                            f"was found in the previous page (fields: {fields})."
-                        ),
-                    }
-                )
+
+        if api_error or not records:
             break
+
         signature = json.dumps(records, sort_keys=True, ensure_ascii=False)
         if signature in seen_pages:
             raw.append(
                 {
                     "path": path,
                     "params": params,
-                    "lookup_error": "NetBrain returned the same page twice; the One-IP scan stopped before completion.",
+                    "scan_warning": "NetBrain returned the same One-IP page twice; scan stopped safely.",
                 }
             )
             break
         seen_pages.add(signature)
+
         if matches:
             rows = useful_rows(target, matches, path)
             if rows:
                 return rows, raw
-        last_record = records[-1]
-        last_page = result
-        begin += len(records)
-    return [], raw
 
+        last_page = result
+        if len(records) < page_size:
+            break
+        begin += len(records)
+
+    return [], raw
 
 def scan_oneip_after_id(
     nb: NetBrain,
