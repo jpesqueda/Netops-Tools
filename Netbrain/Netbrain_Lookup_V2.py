@@ -12,7 +12,7 @@ Author:
     Peskicorp
 
 Version:
-    2.4.0
+    2.5.0
 
 Requirements:
     Python 3.10+
@@ -91,7 +91,7 @@ except ImportError:
 SESSION = "/ServicesAPI/API/V1/Session"
 DEFAULT_OUTPUT = "netbrain_endpoint_report.csv"
 ONEIP_DEEP_OFFSET_LIMIT = 20000
-VERSION = "NetBrain Endpoint Lookup 2.4.0"
+VERSION = "NetBrain Endpoint Lookup 2.5.0"
 console = Console(markup=False) if Console else None
 DEFAULT_ENDPOINTS = [
     "/ServicesAPI/API/V1/CMDB/Devices/ConnectedSwitchPorts",
@@ -204,6 +204,10 @@ class NetBrain:
         # In that case we transparently build a bounded One-IP cache once and
         # reuse it for every MAC target instead of failing every lookup.
         self.oneip_mac_filter_supported: bool | None = None
+        # Once a MAC representation is proven to return an exact match, reuse
+        # that representation first for later targets. This avoids up to eight
+        # trial requests per MAC on NetBrain deployments that are format-strict.
+        self.oneip_mac_preferred_style: str | None = None
         self.oneip_cache: list[dict[str, Any]] | None = None
         self.oneip_cache_complete = False
         self.oneip_cache_warning = ""
@@ -657,35 +661,73 @@ def normalize_mac(mac: str) -> str:
     return ":".join(digits[i : i + 2] for i in range(0, 12, 2))
 
 
-def mac_query_values(mac: str) -> list[str]:
-    """Return common MAC representations accepted by different NetBrain releases.
+def _mac_digits(mac: str) -> str:
+    """Return the 12 hexadecimal digits of a MAC address."""
+    return re.sub(r"[^0-9a-fA-F]", "", mac)
 
-    NetBrain documentation shows Cisco dotted notation, but real deployments may
-    normalize the same MAC differently.  Try the indexed ``mac`` query with a
-    small set of exact representations instead of scanning the complete One-IP
-    table.
-    """
-    digits = re.sub(r"[^0-9a-fA-F]", "", mac)
+
+def format_mac(mac: str, style: str) -> str:
+    """Render a MAC address in a named representation without changing its value."""
+    digits = _mac_digits(mac)
     if len(digits) != 12:
-        return [mac]
+        return mac
 
-    dotted = f"{digits[:4]}.{digits[4:8]}.{digits[8:]}"
-    colon = ":".join(digits[i : i + 2] for i in range(0, 12, 2))
-    hyphen = "-".join(digits[i : i + 2] for i in range(0, 12, 2))
-    compact = digits
+    upper = style.endswith("-upper")
+    rendered_digits = digits.upper() if upper else digits.lower()
+    base_style = style.rsplit("-", 1)[0]
 
-    values = [
-        dotted.upper(),
-        dotted.lower(),
-        colon.upper(),
-        colon.lower(),
-        hyphen.upper(),
-        hyphen.lower(),
-        compact.upper(),
-        compact.lower(),
+    if base_style == "dotted":
+        return f"{rendered_digits[:4]}.{rendered_digits[4:8]}.{rendered_digits[8:]}"
+    if base_style == "colon":
+        return ":".join(rendered_digits[i : i + 2] for i in range(0, 12, 2))
+    if base_style == "hyphen":
+        return "-".join(rendered_digits[i : i + 2] for i in range(0, 12, 2))
+    if base_style == "compact":
+        return rendered_digits
+    return mac
+
+
+def mac_style(mac: str) -> str:
+    """Describe only the representation of a MAC; never return the MAC itself."""
+    value = mac.strip()
+    case = "upper" if any(c.isalpha() for c in value) and value.upper() == value else "lower"
+    if re.fullmatch(r"[0-9A-Fa-f]{4}(?:\.[0-9A-Fa-f]{4}){2}", value):
+        return f"dotted-{case}"
+    if re.fullmatch(r"[0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5}", value):
+        return f"colon-{case}"
+    if re.fullmatch(r"[0-9A-Fa-f]{2}(?:-[0-9A-Fa-f]{2}){5}", value):
+        return f"hyphen-{case}"
+    if re.fullmatch(r"[0-9A-Fa-f]{12}", value):
+        return f"compact-{case}"
+    return "unknown"
+
+
+def mac_query_variants(mac: str, preferred_style: str | None = None) -> list[tuple[str, str]]:
+    """Return labeled MAC representations, optionally prioritizing a known-good style."""
+    styles = [
+        "dotted-upper", "dotted-lower",
+        "colon-upper", "colon-lower",
+        "hyphen-upper", "hyphen-lower",
+        "compact-upper", "compact-lower",
     ]
-    # Preserve order while removing duplicates.
-    return list(dict.fromkeys(values))
+    if preferred_style in styles:
+        styles.remove(preferred_style)
+        styles.insert(0, preferred_style)
+
+    variants: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for style in styles:
+        value = format_mac(mac, style)
+        if value not in seen:
+            seen.add(value)
+            variants.append((style, value))
+    return variants
+
+
+def mac_query_values(mac: str) -> list[str]:
+    """Backward-compatible list of common MAC representations."""
+    return [value for _, value in mac_query_variants(mac)]
+
 
 
 def make_target(raw: str) -> dict[str, str]:
@@ -951,6 +993,85 @@ def _test_oneip_filter(
     return "SUPPORTED", len(records), ""
 
 
+
+def _record_matches_filter(record: dict[str, Any], parameter: str, sample_value: str) -> bool:
+    """Verify that a returned One-IP record actually satisfies a tested filter."""
+    flat = {clean(k): stringify(v).strip() for k, v in flatten(record).items()}
+    parameter = clean(parameter)
+
+    if parameter == "mac":
+        wanted = normalize_mac(sample_value)
+        for key, value in flat.items():
+            if clean(key).endswith("mac") or clean(key) == "mac":
+                for candidate in MAC_RE.findall(value):
+                    try:
+                        if normalize_mac(candidate) == wanted:
+                            return True
+                    except ValueError:
+                        pass
+        return False
+
+    aliases = {
+        "ip": ["ip", "ipaddress"],
+        "lan": ["lansegment", "lan"],
+        "switchname": ["switchname", "switch_name"],
+    }.get(parameter, [parameter])
+    wanted = clean(sample_value)
+    for key, value in flat.items():
+        key_clean = clean(key)
+        if any(key_clean == clean(a) or key_clean.endswith(clean(a)) for a in aliases):
+            if clean(value) == wanted:
+                return True
+    return False
+
+
+def _test_oneip_filter_verified(
+    nb: NetBrain,
+    path: str,
+    parameter: str,
+    sample_value: str,
+    count: int = 100,
+) -> tuple[str, int, int, str]:
+    """Test both HTTP acceptance and semantic filtering of a One-IP query."""
+    if not sample_value:
+        return "NO_SAMPLE", 0, 0, ""
+    params = {parameter: sample_value, "beginIndex": 0, "count": max(1, min(count, 100))}
+    result, records, error = _safe_oneip_request(nb, path, params)
+    if result is None:
+        return "REJECTED", 0, 0, error
+    matches = sum(_record_matches_filter(record, parameter, sample_value) for record in records)
+    if matches:
+        return "VERIFIED", len(records), matches, ""
+    if not records:
+        return "ACCEPTED_EMPTY", 0, 0, ""
+    return "UNVERIFIED", len(records), 0, ""
+
+
+def _test_mac_format_matrix(
+    nb: NetBrain,
+    path: str,
+    sample_mac: str,
+) -> list[tuple[str, str, int, int]]:
+    """Test MAC representations without printing the sampled production MAC value."""
+    if not sample_mac:
+        return []
+    target = {"type": "MAC", "value": normalize_mac(sample_mac), "original": "<sanitized>"}
+    outcomes: list[tuple[str, str, int, int]] = []
+    for style, value in mac_query_variants(sample_mac):
+        params = {"mac": value, "beginIndex": 0, "count": 100}
+        result, records, error = _safe_oneip_request(nb, path, params)
+        if result is None:
+            outcomes.append((style, "REJECTED", 0, 0))
+            continue
+        exact = len(filter_target_records(records, target))
+        if exact:
+            outcomes.append((style, "VERIFIED", len(records), exact))
+        elif records:
+            outcomes.append((style, "UNVERIFIED", len(records), 0))
+        else:
+            outcomes.append((style, "ACCEPTED_EMPTY", 0, 0))
+    return outcomes
+
 def _get_product_version(nb: NetBrain) -> tuple[str, str]:
     """Return sanitized NetBrain product/software version information if exposed."""
     paths = (
@@ -1105,70 +1226,102 @@ def run_oneip_diagnostics(nb: NetBrain, requested_count: int) -> int:
                 debug(f"afterId test error: {cursor_error}")
 
     # ------------------------------------------------------------------
-    # DOCUMENTED FILTER CAPABILITY TESTS
+    # VERIFIED FILTER CAPABILITY TESTS
     # ------------------------------------------------------------------
-    # NetBrain public One-IP documentation describes filters including ip,
-    # mac, lan, and switch_name. The deployment already showed that "mac"
-    # is rejected, so test all four using values sampled internally from the
-    # first page. Sample values are never printed.
-    sample_ip = _first_record_value(first_records, "ip")
-    sample_mac = _first_record_value(first_records, "mac")
-    sample_lan = _first_record_value(first_records, "lanSegment", "lan")
-    sample_switch = _first_record_value(first_records, "switchName", "switch_name")
+    # Use samples from the last accessible window when possible.  This is
+    # deliberate: if NetBrain silently ignores a filter and simply returns the
+    # first page, a sample taken around row 19,000 should not appear there.
+    sample_source = last_records if last_records else first_records
+    sample_ip = _first_record_value(sample_source, "ip")
+    sample_mac = _first_record_value(sample_source, "mac")
+    sample_lan = _first_record_value(sample_source, "lanSegment", "lan")
+    sample_switch = _first_record_value(sample_source, "switchName", "switch_name")
 
-    filter_tests: dict[str, tuple[str, int, str]] = {}
+    verified_tests: dict[str, tuple[str, int, int, str]] = {}
     for label, parameter, sample in (
         ("ip", "ip", sample_ip),
-        ("mac", "mac", sample_mac),
         ("lan", "lan", sample_lan),
         ("switch_name", "switch_name", sample_switch),
     ):
-        filter_tests[label] = _test_oneip_filter(nb, path, parameter, sample)
+        verified_tests[label] = _test_oneip_filter_verified(nb, path, parameter, sample)
 
-    say("\n[+] Testing One-IP partition/filter capabilities...", style="green")
-    for label in ("ip", "mac", "lan", "switch_name"):
-        state, rows_count, error = filter_tests[label]
-        if state == "SUPPORTED":
-            say(f"    {label:<16}: SUPPORTED ({rows_count} row(s) returned)", style="green")
-        elif state == "NO_SAMPLE":
-            say(f"    {label:<16}: NOT TESTED (no sample value in first page)", style="yellow")
-        else:
-            lower = error.casefold()
-            if "invalid parameter" in lower:
-                reason = "invalid parameter"
-            elif "400" in lower:
-                reason = "HTTP 400"
-            else:
-                reason = "request rejected"
-            say(f"    {label:<16}: REJECTED ({reason})", style="yellow")
-            if nb.verbose:
-                debug(f"One-IP filter test {label}: {error}")
-
-    # If switch_name is supported, make one additional partition paging probe.
-    # This does not expose the switch name. It only tells us whether a filtered
-    # partition can be paged independently.
-    switch_partition_viable = False
-    switch_state, switch_rows, _ = filter_tests["switch_name"]
-    if switch_state == "SUPPORTED" and sample_switch:
-        probe_params = {
-            "switch_name": sample_switch,
-            "beginIndex": 100,
-            "count": 1,
-        }
-        probe_result, probe_records, probe_error = _safe_oneip_request(nb, path, probe_params)
-        if probe_result is not None:
-            switch_partition_viable = True
+    say("\n[+] Verifying One-IP filter semantics...", style="green")
+    for label in ("ip", "lan", "switch_name"):
+        state, rows_count, match_count, error = verified_tests[label]
+        if state == "VERIFIED":
             say(
-                f"    switch partition   : PAGING ACCEPTED "
-                f"(offset 100 returned {len(probe_records)} row(s))",
+                f"    {label:<16}: VERIFIED ({match_count}/{rows_count} returned row(s) match filter)",
                 style="green",
             )
+        elif state == "ACCEPTED_EMPTY":
+            say(f"    {label:<16}: ACCEPTED but returned no rows", style="yellow")
+        elif state == "UNVERIFIED":
+            say(
+                f"    {label:<16}: UNVERIFIED ({rows_count} row(s) returned, 0 matched filter)",
+                style="yellow",
+            )
+        elif state == "NO_SAMPLE":
+            say(f"    {label:<16}: NOT TESTED (no sample value)", style="yellow")
         else:
-            say("    switch partition   : FILTER WORKS; paging probe rejected", style="yellow")
+            say(f"    {label:<16}: REJECTED", style="yellow")
+            if nb.verbose and error:
+                debug(f"One-IP filter test {label}: {error}")
+
+    # MAC is special because R12.x deployments can be strict about notation.
+    # Test common representations, but only print the format name -- never the
+    # sampled production MAC value.
+    say("\n[+] Testing MAC query representations...", style="green")
+    if sample_mac:
+        say(f"    Stored sample style : {mac_style(sample_mac)}")
+    mac_matrix = _test_mac_format_matrix(nb, path, sample_mac)
+    verified_mac_styles = [style for style, state, _, _ in mac_matrix if state == "VERIFIED"]
+    for style, state, rows_count, exact_count in mac_matrix:
+        if state == "VERIFIED":
+            say(
+                f"    {style:<16}: VERIFIED ({exact_count}/{rows_count} row(s) exact MAC match)",
+                style="green",
+            )
+        elif state == "REJECTED":
+            say(f"    {style:<16}: REJECTED", style="yellow")
+        elif state == "ACCEPTED_EMPTY":
+            say(f"    {style:<16}: ACCEPTED, no rows", style="yellow")
+        else:
+            say(
+                f"    {style:<16}: UNVERIFIED ({rows_count} row(s), 0 exact MAC matches)",
+                style="yellow",
+            )
+
+    direct_mac_verified = bool(verified_mac_styles)
+    if direct_mac_verified:
+        say(f"    Preferred MAC style: {verified_mac_styles[0]}", style="green")
+    else:
+        say("    Preferred MAC style: none verified", style="yellow")
+
+    # Verify that switch_name is not merely HTTP-accepted but actually filters.
+    switch_partition_viable = False
+    switch_state, switch_rows, switch_matches, _ = verified_tests["switch_name"]
+    if switch_state == "VERIFIED" and sample_switch:
+        probe_params = {"switch_name": sample_switch, "beginIndex": 100, "count": 1}
+        probe_result, probe_records, probe_error = _safe_oneip_request(nb, path, probe_params)
+        if probe_result is not None:
+            probe_match = not probe_records or all(
+                _record_matches_filter(record, "switch_name", sample_switch) for record in probe_records
+            )
+            if probe_match:
+                switch_partition_viable = True
+                say(
+                    f"    switch partition   : VERIFIED PAGING "
+                    f"(offset 100 returned {len(probe_records)} row(s))",
+                    style="green",
+                )
+            else:
+                say("    switch partition   : PAGING RESPONSE DID NOT MATCH FILTER", style="yellow")
+        else:
+            say("    switch partition   : FILTER VERIFIED; paging probe rejected", style="yellow")
             if nb.verbose:
                 debug(f"switch_name partition paging probe: {probe_error}")
 
-    lan_partition_viable = filter_tests["lan"][0] == "SUPPORTED"
+    lan_partition_viable = verified_tests["lan"][0] == "VERIFIED"
 
     # ------------------------------------------------------------------
     # CONCLUSION
@@ -1212,20 +1365,29 @@ def run_oneip_diagnostics(nb: NetBrain, requested_count: int) -> int:
     else:
         say("    Cursor paging      : No usable cursor exposed in the tested response", style="yellow")
 
-    # Recommend a tested alternative only when the deployment actually accepts it.
-    if switch_partition_viable:
+    # Prefer a verified exact MAC query over partition scanning.  It is far
+    # faster and avoids the global 20,000-row pagination issue entirely.
+    if direct_mac_verified:
         say(
-            "    Alternate strategy : SUPPORTED - partition One-IP lookups by switch_name",
+            f"    Direct MAC lookup   : VERIFIED using {verified_mac_styles[0]}",
             style="green",
         )
         say(
-            "    Next engineering   : Enumerate switches, query each switch partition, "
-            "and match target MACs locally.",
+            "    Next engineering   : Use format-aware direct MAC lookup; only fall back to partitions on a true miss.",
+            style="green",
+        )
+    elif switch_partition_viable:
+        say(
+            "    Alternate strategy : VERIFIED - partition One-IP lookups by switch_name",
+            style="green",
+        )
+        say(
+            "    Next engineering   : Enumerate switches, query each switch partition, and match target MACs locally.",
             style="green",
         )
     elif lan_partition_viable:
         say(
-            "    Alternate strategy : POSSIBLE - partition One-IP lookups by LAN segment",
+            "    Alternate strategy : VERIFIED - partition One-IP lookups by LAN segment",
             style="green",
         )
         say(
@@ -1239,14 +1401,9 @@ def run_oneip_diagnostics(nb: NetBrain, requested_count: int) -> int:
         )
     else:
         say(
-            "    Alternate strategy : No tested partition workaround confirmed yet",
+            "    Alternate strategy : No semantically verified workaround confirmed yet",
             style="yellow",
         )
-        say(
-            "    Next engineering   : Inspect deployment-specific APIs or NetBrain support metadata.",
-            style="yellow",
-        )
-
     say("\n[+] Diagnostic completed. No One-IP record values were printed.", style="green")
     return 0
 
@@ -1264,8 +1421,8 @@ def _build_oneip_cache(
 ) -> tuple[list[dict[str, Any]], bool, str]:
     """Build a reusable, bounded One-IP cache for MAC fallback lookups.
 
-    Some NetBrain installations reject ``?mac=...`` even though other releases
-    document it.  Scanning once and caching the result avoids repeating a large
+    Some NetBrain installations are strict about ``?mac=...`` notation or do
+    not return an exact match for every representation.  Scanning once and caching the result avoids repeating a large
     table walk for every MAC address.  The scan stops before the known deep
     offset boundary so it does not generate the HTTP 400 seen in older code.
     """
@@ -1279,7 +1436,7 @@ def _build_oneip_cache(
     complete = False
 
     say(
-        "[+] NetBrain does not accept the One-IP MAC filter; "
+        "[+] Direct One-IP MAC lookup did not resolve the target; "
         "building a reusable One-IP cache...",
         style="yellow",
     )
@@ -1383,53 +1540,83 @@ def oneip_lookup(
             return [], raw
 
     else:
-        # Try the server-side MAC filter until the server proves that this
-        # deployment does not support it.  Once unsupported, do not repeat the
-        # same HTTP 400 for every address in hosts.txt.
-        if nb.oneip_mac_filter_supported is not False:
-            for value in mac_query_values(target["value"]):
-                params = {"mac": value, "beginIndex": 0, "count": page_size}
-                result = nb.try_call("GET", path, params=params)
+        # Try every common MAC representation.  IMPORTANT: HTTP 400 for one
+        # representation does not mean the `mac` filter itself is unsupported;
+        # R12.x deployments may simply reject that notation.  Continue testing
+        # the remaining representations and remember the first style that
+        # produces an exact MAC match.
+        accepted_any = False
+        exact_query_succeeded = False
+        variants = mac_query_variants(target["value"], nb.oneip_mac_preferred_style)
 
-                if result:
-                    nb.oneip_mac_filter_supported = True
-                    candidates = records_from(result)
-                    records = filter_target_records(candidates, target)
-                    entry = {"path": path, "params": params, "response": result}
-                    if error := api_status_error(result):
-                        entry["api_error"] = error
-                    raw.append(entry)
+        for style, value in variants:
+            params = {"mac": value, "beginIndex": 0, "count": page_size}
+            result = nb.try_call("GET", path, params=params)
 
-                    if nb.verbose:
-                        debug(
-                            f"One-IP exact query (mac={value}): "
-                            f"records={len(candidates)}, matches={len(records)}"
-                        )
+            if result:
+                accepted_any = True
+                candidates = records_from(result)
+                records = filter_target_records(candidates, target)
+                entry = {
+                    "path": path,
+                    "params": {"mac": f"<{style}>", "beginIndex": 0, "count": page_size},
+                    "response": result,
+                }
+                if error := api_status_error(result):
+                    entry["api_error"] = error
+                raw.append(entry)
 
-                    if records:
-                        rows = useful_rows(target, records, path)
-                        if rows:
-                            return rows, raw
-                    continue
-
-                if _is_invalid_mac_filter_error(nb.last_error):
-                    nb.oneip_mac_filter_supported = False
-                    raw.append(
-                        {
-                            "path": path,
-                            "params": params,
-                            "capability_warning": (
-                                "This NetBrain deployment rejects the One-IP 'mac' query parameter; "
-                                "using cached table-scan fallback."
-                            ),
-                        }
+                if nb.verbose:
+                    debug(
+                        f"One-IP MAC query style={style}: "
+                        f"records={len(candidates)}, exact_matches={len(records)}"
                     )
-                    if nb.verbose:
-                        debug("One-IP MAC query parameter rejected by server; enabling cached fallback.")
-                    break
 
-                if nb.last_error:
-                    raw.append({"path": path, "params": params, "api_error": str(nb.last_error)})
+                if records:
+                    nb.oneip_mac_filter_supported = True
+                    nb.oneip_mac_preferred_style = style
+                    exact_query_succeeded = True
+                    rows = useful_rows(target, records, path)
+                    if rows:
+                        return rows, raw
+                # Accepted but not an exact match: keep trying other formats.
+                continue
+
+            if _is_invalid_mac_filter_error(nb.last_error):
+                raw.append(
+                    {
+                        "path": path,
+                        "params": {"mac": f"<{style}>", "beginIndex": 0, "count": page_size},
+                        "capability_warning": f"MAC representation {style} rejected by NetBrain.",
+                    }
+                )
+                if nb.verbose:
+                    debug(f"One-IP MAC representation rejected: {style}")
+                continue
+
+            if nb.last_error:
+                raw.append(
+                    {
+                        "path": path,
+                        "params": {"mac": f"<{style}>", "beginIndex": 0, "count": page_size},
+                        "api_error": str(nb.last_error),
+                    }
+                )
+
+        if exact_query_succeeded:
+            nb.oneip_mac_filter_supported = True
+        else:
+            # No representation produced an exact server-side result.  A
+            # bounded fallback is safer than incorrectly reporting NOT FOUND.
+            nb.oneip_mac_filter_supported = False
+            reason = (
+                "NetBrain accepted one or more MAC queries but none returned an exact match; "
+                "using fallback lookup."
+                if accepted_any
+                else
+                "NetBrain rejected all tested MAC representations; using fallback lookup."
+            )
+            raw.append({"path": path, "capability_warning": reason})
 
         # Automatic compatibility fallback.  This is intentionally enabled for
         # MAC targets when the live server rejects the MAC query parameter.
