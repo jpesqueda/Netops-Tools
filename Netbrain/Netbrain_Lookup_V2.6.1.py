@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-NetBrain Endpoint Lookup
-========================
+Netbrain_Lookup
+===============
 
 Description:
     Searches NetBrain endpoint information using IPv4 or MAC addresses.
@@ -12,7 +12,7 @@ Author:
     Peskicorp
 
 Version:
-    2.6.1 Release Candidate
+    2.6.2 Release Candidate 2
 
 Requirements:
     Python 3.10+
@@ -24,18 +24,23 @@ Installation:
 Security / Sanitization:
     This source file contains no production server names, usernames, passwords,
     tenant/domain names, IP addresses, MAC addresses, serial numbers, or site names.
-    Version 2.6.1 RC lookup strategy:
+    Version 2.6.2 RC2 lookup strategy:
         IPv4       : direct One-IP ``ip`` filter
         MAC        : direct One-IP ``mac`` filter using dotted-lower format
                      (example: aaaa.aaaa.aaaa)
         MAC miss   : optional verification by ``switch_name`` partitions
         Global scan: never used automatically for MAC targets
 
-    Release Candidate result semantics:
-        FOUND              : exact endpoint evidence was returned
-        VERIFIED_NOT_FOUND : direct MAC miss + complete switch verification
-        UNRESOLVED         : verification was incomplete due to API/paging error
-        ERROR              : the lookup itself could not be completed safely
+    Release Candidate 2 result semantics:
+        FOUND                  : exact endpoint evidence was returned
+        VERIFIED_NOT_FOUND     : direct MAC miss + complete secondary verification
+        DIRECT_MAC_NOT_FOUND   : direct MAC miss; secondary verification was partial
+        ERROR                  : the primary lookup itself could not be completed safely
+
+    Logging behavior:
+        Non-fatal warnings, partition failures, pagination limits, and detailed
+        API errors are written to a .log file instead of cluttering terminal output.
+        By default, -o Report.csv automatically creates Report.log.
 
     Documentation examples use reserved/generic values only:
         NetBrain URL : https://netbrain.example.local
@@ -82,6 +87,7 @@ import getpass
 import ipaddress
 import json
 import re
+from datetime import datetime
 import ssl
 import sys
 from pathlib import Path
@@ -104,10 +110,10 @@ except ImportError:
 # ============================================================================
 
 SESSION = "/ServicesAPI/API/V1/Session"
-DEFAULT_OUTPUT = "netbrain_endpoint_report.csv"
+DEFAULT_OUTPUT = "Netbrain_Lookup_Report.csv"
 ONEIP_DEEP_OFFSET_LIMIT = 20000
 DEFAULT_MAC_QUERY_STYLE = "dotted-lower"
-VERSION = "NetBrain Endpoint Lookup 2.6.1 RC1"
+VERSION = "Netbrain_Lookup 2.6.2 RC2"
 console = Console(markup=False) if Console else None
 DEFAULT_ENDPOINTS = [
     "/ServicesAPI/API/V1/CMDB/Devices/ConnectedSwitchPorts",
@@ -140,6 +146,7 @@ COLS = [
     "target_type",
     "status",
     "lookup_method",
+    "verification",
     "endpoint_ip",
     "endpoint_mac",
     "endpoint_name",
@@ -176,6 +183,59 @@ ALIASES = {
     "serial": "serial sn serialnumber".split(),
 }
 IGNORE_KEYS = {"statuscode", "statusdescription", "status", "message", "error", "errors"}
+
+# Runtime diagnostic log. Initialized from the CSV output name in main().
+LOG_PATH: Path | None = None
+
+def init_runtime_log(path: Path) -> None:
+    """Create a fresh diagnostic log for this execution."""
+    global LOG_PATH
+    LOG_PATH = path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        handle.write("Netbrain_Lookup v2.6.2 RC2 - Runtime Diagnostic Log\n")
+        handle.write(f"Started: {datetime.now().isoformat(timespec='seconds')}\n")
+        handle.write("=" * 78 + "\n")
+
+def log_event(level: str, message: str) -> None:
+    """Append one timestamped diagnostic entry without printing it to the terminal."""
+    if LOG_PATH is None:
+        return
+    try:
+        with LOG_PATH.open("a", encoding="utf-8") as handle:
+            stamp = datetime.now().isoformat(timespec="seconds")
+            handle.write(f"{stamp} [{level.upper()}] {message}\n")
+    except OSError:
+        # Logging must never break the lookup workflow.
+        pass
+
+def log_raw_diagnostics(data: Any) -> None:
+    """Extract known warning/error fields from collected raw diagnostics."""
+    diagnostic_keys = {
+        "api_error": "ERROR",
+        "lookup_error": "ERROR",
+        "scan_warning": "WARNING",
+        "pagination_warning": "WARNING",
+        "capability_warning": "WARNING",
+    }
+    seen: set[tuple[str, str]] = set()
+
+    def walk(value: Any) -> None:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if key in diagnostic_keys and item:
+                    text = str(item)
+                    pair = (diagnostic_keys[key], text)
+                    if pair not in seen:
+                        seen.add(pair)
+                        log_event(*pair)
+                elif isinstance(item, (dict, list)):
+                    walk(item)
+        elif isinstance(value, list):
+            for item in value:
+                walk(item)
+
+    walk(data)
 
 
 # ============================================================================
@@ -360,14 +420,23 @@ class NetBrain:
 
 def main() -> int:
     args = parse_args()
+    output = Path(args.output or DEFAULT_OUTPUT)
+    log_path = Path(args.log) if args.log else output.with_suffix(".log")
+    init_runtime_log(log_path)
+    args.log_path = str(log_path)
+
     show_banner()
+    log_event("INFO", f"Script file: {Path(__file__).resolve()}")
+    log_event("INFO", f"CSV output: {output.resolve()}")
+    log_event("INFO", f"Diagnostic log: {log_path.resolve()}")
     if args.verbose:
         debug(f"Script file: {Path(__file__).resolve()}")
     if args.insecure:
-        say("[!] WARNING", style="yellow")
-        say("    TLS certificate verification : DISABLED (--insecure)", style="yellow")
-        say("    HTTPS encryption             : ENABLED", style="yellow")
-        say("    Certificate authenticity     : NOT VERIFIED", style="yellow")
+        log_event(
+            "WARNING",
+            "TLS certificate verification is disabled (--insecure). HTTPS encryption remains enabled, "
+            "but certificate authenticity is not verified.",
+        )
 
     # ---------------------------------------------------------------------
     # DIAGNOSTIC MODE - ONE-IP TABLE CAPABILITIES
@@ -379,8 +448,7 @@ def main() -> int:
     if args.oneip_info:
         url = (args.url or input("NetBrain URL: ")).strip().rstrip("/")
         if not url:
-            say("[-] ERROR: NetBrain URL is required.", error=True)
-            return 2
+            return report_error("NetBrain URL is required.", 2)
         user = args.username or input("NetBrain Username: ").strip()
         password = args.password if args.password is not None else getpass.getpass("NetBrain Password: ")
         nb = NetBrain(url, user, password, args)
@@ -398,33 +466,30 @@ def main() -> int:
             nb.logout()
 
     if args.host is None and args.hosts_file is None:
-        say("[-] ERROR: Use --host, --hosts-file, or --oneip-info.", error=True)
-        return 2
+        return report_error("Use --host, --hosts-file, or --oneip-info.", 2)
 
     if args.host is not None:
         target = make_target(args.host.strip())
         if target["type"] == "INVALID":
-            say(f"[-] ERROR: Invalid endpoint: {target['value']}", error=True)
-            return 2
+            return report_error(f"Invalid endpoint: {target['value']}", 2)
         targets = [target]
     else:
         hosts_file = Path(args.hosts_file)
         try:
             targets = load_targets(hosts_file)
         except (OSError, UnicodeError):
-            say(f"[-] ERROR: Hosts file not found: {hosts_file}", error=True)
-            return 2
+            return report_error(f"Hosts file not found: {hosts_file}", 2)
     if not targets:
-        say("[-] ERROR: Hosts file contains no targets.", error=True)
-        return 2
+        return report_error("Hosts file contains no targets.", 2)
 
     rows: list[dict[str, str]] = []
     raw: list[dict[str, Any]] = []
     fallback_stats: dict[str, int] = {
         "requested": 0, "switches": 0, "scanned": 0, "resolved": 0,
-        "remaining": 0, "verified_not_found": 0, "unresolved": 0,
+        "remaining": 0, "verified_not_found": 0, "partial_not_found": 0,
         "failed_switches": 0, "inventory_errors": 0,
         "pagination_limited": 0, "verification_complete": 0,
+        "partitions_complete": 0, "partitions_incomplete": 0,
     }
     valid_targets = [target for target in targets if target["type"] != "INVALID"]
     for target in targets:
@@ -432,8 +497,7 @@ def main() -> int:
     if valid_targets:
         url = (args.url or input("NetBrain URL: ")).strip().rstrip("/")
         if not url:
-            say("[-] ERROR: NetBrain URL is required.", error=True)
-            return 2
+            return report_error("NetBrain URL is required.", 2)
         # Credentials are supplied at runtime. Nothing is hardcoded in the source.
         user = args.username or input("NetBrain Username: ").strip()
         password = args.password if args.password is not None else getpass.getpass("NetBrain Password: ")
@@ -488,47 +552,43 @@ def main() -> int:
                 if fallback_raw:
                     raw.append({"switch_partition_fallback": fallback_raw})
                 if fallback_stats.get("requested", 0):
-                    say("[+] Switch-partition MAC verification", style="green")
-                    say(f"    Direct misses       : {fallback_stats['requested']}", style="green")
-                    say(f"    Candidate switches  : {fallback_stats['switches']}", style="green")
-                    say(f"    Switches scanned    : {fallback_stats['scanned']}", style="green")
-                    say(f"    Resolved            : {fallback_stats['resolved']}", style="green")
-                    say(f"    Verified not found  : {fallback_stats['verified_not_found']}", style="green")
-                    coverage = "COMPLETE" if fallback_stats.get("verification_complete") else "INCOMPLETE"
-                    say(
-                        f"    Verification coverage: {coverage}",
-                        style="green" if coverage == "COMPLETE" else "yellow",
-                    )
-                    if fallback_stats.get("unresolved", 0):
-                        say(f"    Unresolved          : {fallback_stats['unresolved']}", style="yellow")
-                    if fallback_stats.get("failed_switches", 0):
-                        say(f"    Partition failures  : {fallback_stats['failed_switches']}", style="yellow")
-                    if fallback_stats.get("inventory_errors", 0):
-                        say(f"    Inventory errors    : {fallback_stats['inventory_errors']}", style="yellow")
-                    if fallback_stats.get("pagination_limited", 0):
-                        say(f"    Pagination limits   : {fallback_stats['pagination_limited']}", style="yellow")
+                    say("[+] Secondary MAC verification", style="green")
+                    say(f"    MACs submitted       : {fallback_stats['requested']}", style="green")
+                    say(f"    Candidate switches   : {fallback_stats['switches']}", style="green")
+                    say(f"    Partitions complete  : {fallback_stats['partitions_complete']}", style="green")
+                    say(f"    Partitions incomplete: {fallback_stats['partitions_incomplete']}", style="green")
+                    say(f"    Fallback resolved    : {fallback_stats['resolved']}", style="green")
+                    say(f"    Fully verified misses: {fallback_stats['verified_not_found']}", style="green")
+                    coverage = "COMPLETE" if fallback_stats.get("verification_complete") else "PARTIAL"
+                    say(f"    Coverage              : {coverage}", style="green")
         finally:
             nb.logout()
     else:
         rows.extend(invalid_row(target) for target in targets)
 
+    # Persist detailed warnings/errors to the runtime log, not to terminal output.
+    log_raw_diagnostics(raw)
+    for row in rows:
+        if row.get("status") == "error":
+            log_event(
+                "ERROR",
+                f"Target {row.get('target', 'N/A')} lookup failed: {row.get('notes') or 'No detail available'}",
+            )
+
     rows = [{column: row.get(column) or "N/A" for column in COLS} for row in rows]
-    output = Path(args.output or DEFAULT_OUTPUT)
     write_csv(output, rows)
     if args.raw_json:
         Path(args.raw_json).write_text(json.dumps(raw, indent=2, ensure_ascii=False), encoding="utf-8")
+        log_event("WARNING", "Raw JSON output can contain live network data; sanitize it before sharing.")
     display_results(rows)
     has_errors = any(row["status"] == "error" for row in rows)
-    has_unresolved = any(row["status"] == "unresolved" for row in rows)
-    display_search_summary(rows, output, args, fallback_stats)
+    display_search_summary(rows, output, log_path, args, fallback_stats)
 
     if has_errors:
-        say("[!] Lookup finished with errors; some targets may be incomplete.", style="yellow")
-    elif has_unresolved:
-        say("[!] Lookup completed with unresolved targets; verification was incomplete.", style="yellow")
+        say(f"[+] Lookup completed. Detailed errors were written to: {log_path.resolve()}", style="green")
     else:
         say("[+] Lookup completed successfully.", style="green")
-    return 5 if (has_errors or has_unresolved) else 0
+    return 5 if has_errors else 0
 
 
 # ============================================================================
@@ -537,23 +597,23 @@ def main() -> int:
 
 def parse_args() -> argparse.Namespace:
     examples = """USAGE
-  python netbrain_endpoint_lookup.py --url URL --host TARGET
-  python netbrain_endpoint_lookup.py --url URL --hosts-file FILE
-  python netbrain_endpoint_lookup.py --url URL --oneip-info
+  python Netbrain_Lookup.py --url URL --host TARGET
+  python Netbrain_Lookup.py --url URL --hosts-file FILE
+  python Netbrain_Lookup.py --url URL --oneip-info
 
 EXAMPLES
   # Generic IPv4 example (192.168.1.X)
-  python netbrain_endpoint_lookup.py --url https://netbrain.example.local --host 192.168.1.10
-  python netbrain_endpoint_lookup.py --url https://netbrain.example.local --host aa:aa:aa:aa:aa:aa
-  python netbrain_endpoint_lookup.py --url https://netbrain.example.local --host aa-aa-aa-aa-aa-aa
-  python netbrain_endpoint_lookup.py --url https://netbrain.example.local --hosts-file hosts.txt
-  python netbrain_endpoint_lookup.py --url https://netbrain.example.local --hosts-file hosts.txt --insecure
-  python netbrain_endpoint_lookup.py --url https://netbrain.example.local --hosts-file hosts.txt --user USERNAME --insecure
-  python netbrain_endpoint_lookup.py --url https://netbrain.example.local --hosts-file hosts.txt --output endpoints.csv
-  python netbrain_endpoint_lookup.py --url https://netbrain.example.local --hosts-file hosts.txt --mac-style dotted-lower
+  python Netbrain_Lookup.py --url https://netbrain.example.local --host 192.168.1.10
+  python Netbrain_Lookup.py --url https://netbrain.example.local --host aa:aa:aa:aa:aa:aa
+  python Netbrain_Lookup.py --url https://netbrain.example.local --host aa-aa-aa-aa-aa-aa
+  python Netbrain_Lookup.py --url https://netbrain.example.local --hosts-file hosts.txt
+  python Netbrain_Lookup.py --url https://netbrain.example.local --hosts-file hosts.txt --insecure
+  python Netbrain_Lookup.py --url https://netbrain.example.local --hosts-file hosts.txt --user USERNAME --insecure
+  python Netbrain_Lookup.py --url https://netbrain.example.local --hosts-file hosts.txt --output endpoints.csv
+  python Netbrain_Lookup.py --url https://netbrain.example.local --hosts-file hosts.txt --mac-style dotted-lower
 
   # One-IP Table diagnostic mode (no endpoint target required)
-  python netbrain_endpoint_lookup.py --url https://netbrain.example.local --oneip-info --insecure --user USERNAME"""
+  python Netbrain_Lookup.py --url https://netbrain.example.local --oneip-info --insecure --user USERNAME"""
     p = argparse.ArgumentParser(
         description=(
             "DESCRIPTION\n"
@@ -581,7 +641,17 @@ EXAMPLES
     ssl_options.add_argument("--insecure", action="store_true", help="Disable TLS certificate verification (not recommended)")
 
     output = p.add_argument_group("OUTPUT OPTIONS")
-    output.add_argument("-o", "--output", default=DEFAULT_OUTPUT, help=f"CSV output path (default: {DEFAULT_OUTPUT})")
+    output.add_argument(
+        "-o", "--output", default=DEFAULT_OUTPUT,
+        help=(
+            f"CSV report path/name (default: {DEFAULT_OUTPUT}). "
+            "Example: -o Report.csv. The default log becomes Report.log."
+        ),
+    )
+    output.add_argument(
+        "--log",
+        help="Optional diagnostic log path. Default: same basename as --output with .log extension.",
+    )
     output.add_argument(
         "--raw-json",
         help="Save raw API responses to JSON (WARNING: runtime output may contain live network data)",
@@ -624,7 +694,7 @@ EXAMPLES
         "--oneip-scan",
         action="store_true",
         help=(
-            "Optional global One-IP scan after an exact IP miss. In v2.6.1 RC this "
+            "Optional global One-IP scan after an exact IP miss. In v2.6.2 RC2 this "
             "is not used automatically for MAC targets."
         ),
     )
@@ -635,7 +705,7 @@ EXAMPLES
     )
     advanced.add_argument("--oneip-count", type=int, default=1000, help="Rows per One-IP Table page (max: 1000)")
     advanced.add_argument("--timeout", type=int, default=30, help="HTTP timeout in seconds (default: 30)")
-    advanced.add_argument("-v", "--verbose", action="store_true", help="Show target and request diagnostics; secrets are omitted")
+    advanced.add_argument("-v", "--verbose", action="store_true", help="Write detailed target/request diagnostics to the .log file; secrets are omitted where practical")
     return p.parse_args()
 
 
@@ -666,7 +736,7 @@ def select_domain(nb: NetBrain, tenant_arg: str | None, domain_arg: str | None) 
 
 def choose(items: list[dict[str, Any]], wanted: str | None, name: str, item_id: str, label: str) -> dict[str, Any] | None:
     if not items:
-        say(f"[WARN] Could not list {label}; continuing without selecting it.", error=True)
+        log_event("WARNING", f"Could not list {label}; continuing without selecting it.")
         return None
     if wanted:
         for item in items:
@@ -942,6 +1012,7 @@ def lookup(
     )
     row = empty_row(target, "error" if errors else "not-found")
     row["lookup_method"] = "DIRECT_MAC" if target["type"] == "MAC" else "DIRECT_IP"
+    row["verification"] = "PRIMARY"
     if errors:
         row["notes"] = "One-IP lookup incomplete: " + "; ".join(errors)
     elif warnings:
@@ -1618,19 +1689,22 @@ def resolve_mac_misses_by_switch_partitions(
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
     """Verify unresolved MAC targets using ``switch_name`` partitions.
 
-    Release Candidate behavior:
-      * Direct dotted-lower MAC lookup remains the primary search.
-      * Every unresolved MAC is checked across the available switch inventory.
-      * ``VERIFIED_NOT_FOUND`` is assigned only when the inventory and every
-        required switch partition were read without API/pagination errors.
-      * ``UNRESOLVED`` is assigned when verification is incomplete.
+    RC2 behavior:
+      * Direct dotted-lower MAC lookup remains the authoritative primary search.
+      * Every direct miss may be checked across switch_name partitions.
+      * ``VERIFIED_NOT_FOUND`` means the direct miss was also fully verified.
+      * ``DIRECT_MAC_NOT_FOUND`` means the direct lookup returned no exact match
+        but secondary partition verification was partial.
+      * Partition/API/pagination problems are written to the runtime .log file.
 
-    This distinction prevents an incomplete API scan from being presented as a
-    definitive negative result.
+    A secondary verification failure no longer changes a valid direct MAC miss
+    into UNRESOLVED.
     """
     unresolved_rows: dict[str, list[dict[str, str]]] = {}
     for row in rows:
-        if row.get("target_type") != "MAC" or row.get("status") == "found":
+        # Only a successful primary query that returned no exact match is eligible
+        # for secondary verification. Primary API errors remain ERROR and are logged.
+        if row.get("target_type") != "MAC" or row.get("status") != "not-found":
             continue
         try:
             mac = normalize_mac(row.get("target", ""))
@@ -1645,11 +1719,13 @@ def resolve_mac_misses_by_switch_partitions(
         "resolved": 0,
         "remaining": 0,
         "verified_not_found": 0,
-        "unresolved": 0,
+        "partial_not_found": 0,
         "failed_switches": 0,
         "inventory_errors": 0,
         "pagination_limited": 0,
         "verification_complete": 0,
+        "partitions_complete": 0,
+        "partitions_incomplete": 0,
     }
     raw: list[dict[str, Any]] = []
     if not unresolved_rows:
@@ -1662,6 +1738,12 @@ def resolve_mac_misses_by_switch_partitions(
         1 for item in inventory_raw if item.get("api_error") or item.get("lookup_error")
     )
     stats["inventory_errors"] = inventory_errors
+    if inventory_errors:
+        log_event("ERROR", f"Device inventory returned {inventory_errors} API/pagination diagnostic error(s).")
+        for item in inventory_raw:
+            detail = item.get("api_error") or item.get("lookup_error")
+            if detail:
+                log_event("ERROR", f"Device inventory detail: {detail}")
 
     # Unique switch names, preserving CMDB order.
     candidates: list[str] = []
@@ -1681,6 +1763,8 @@ def resolve_mac_misses_by_switch_partitions(
     # We still scan any candidates that were successfully obtained because they
     # may resolve some targets, but remaining misses cannot be definitive.
     verification_problem = bool(inventory_errors or not candidates)
+    if not candidates:
+        log_event("WARNING", "Secondary MAC verification could not enumerate any candidate switch partitions.")
 
     for switch_name in candidates:
         if not unresolved_rows:
@@ -1696,31 +1780,38 @@ def resolve_mac_misses_by_switch_partitions(
             if begin >= ONEIP_DEEP_OFFSET_LIMIT:
                 partition_failed = True
                 stats["pagination_limited"] += 1
-                raw.append(
-                    {
-                        "path": path,
-                        "pagination_warning": (
-                            "A switch partition reached the 20,000-row safety boundary."
-                        ),
-                    }
+                reason = (
+                    f"Switch partition '{switch_name}' reached the {ONEIP_DEEP_OFFSET_LIMIT:,}-row "
+                    f"offset safety boundary at beginIndex={begin}; deeper offset pagination is unavailable."
                 )
+                log_event("WARNING", reason)
+                raw.append({"path": path, "pagination_warning": reason})
                 break
 
             params = {"switch_name": switch_name, "beginIndex": begin, "count": count}
             result = nb.try_call("GET", path, params=params)
             if result is None:
                 partition_failed = True
+                reason = str(nb.last_error or "unknown error")
+                log_event(
+                    "ERROR",
+                    f"Switch partition '{switch_name}' API request failed at beginIndex={begin}: {reason}",
+                )
                 raw.append(
                     {
                         "path": path,
                         "params": {"switch_name": "<redacted>", "beginIndex": begin, "count": count},
-                        "api_error": str(nb.last_error or "unknown error"),
+                        "api_error": reason,
                     }
                 )
                 break
 
             if error := api_status_error(result):
                 partition_failed = True
+                log_event(
+                    "ERROR",
+                    f"Switch partition '{switch_name}' returned an API status error at beginIndex={begin}: {error}",
+                )
                 raw.append(
                     {
                         "path": path,
@@ -1745,7 +1836,9 @@ def resolve_mac_misses_by_switch_partitions(
             signature = json.dumps(records, sort_keys=True, ensure_ascii=False)
             if signature in seen_pages:
                 partition_failed = True
-                raw.append({"path": path, "lookup_error": "Switch partition repeated a page."})
+                reason = f"Switch partition '{switch_name}' repeated a page at beginIndex={begin}; pagination stopped."
+                log_event("ERROR", reason)
+                raw.append({"path": path, "lookup_error": reason})
                 break
             seen_pages.add(signature)
 
@@ -1758,6 +1851,7 @@ def resolve_mac_misses_by_switch_partitions(
                         continue
                     resolved = candidate_rows[0]
                     resolved["lookup_method"] = "SWITCH_PARTITION"
+                    resolved["verification"] = "FALLBACK_FOUND"
                     switch_key = clean(resolved.get("switch_name") or switch_name)
                     _enrich_switch_metadata(resolved, inventory.get(switch_key))
                     resolved["notes"] = "Verified by switch_name partition fallback after direct MAC miss."
@@ -1779,12 +1873,19 @@ def resolve_mac_misses_by_switch_partitions(
 
         if partition_failed:
             stats["failed_switches"] += 1
+            stats["partitions_incomplete"] += 1
             verification_problem = True
-        elif unresolved_rows and not partition_complete:
-            # Defensive guard: a remaining target requires a demonstrably
-            # complete partition before a definitive NOT FOUND is possible.
+        elif partition_complete:
+            stats["partitions_complete"] += 1
+        elif unresolved_rows:
+            # Defensive guard: the partition ended without a demonstrated EOF.
             stats["failed_switches"] += 1
+            stats["partitions_incomplete"] += 1
             verification_problem = True
+            log_event(
+                "WARNING",
+                f"Switch partition '{switch_name}' ended without an explicit completion condition.",
+            )
 
     remaining_count = len(unresolved_rows)
     stats["remaining"] = remaining_count
@@ -1796,23 +1897,32 @@ def resolve_mac_misses_by_switch_partitions(
 
         for mac, target_rows in unresolved_rows.items():
             for row in target_rows:
+                row["status"] = "not-found"
                 if verification_complete:
-                    row["status"] = "not-found"
                     row["lookup_method"] = "VERIFIED_NOT_FOUND"
+                    row["verification"] = "COMPLETE"
                     note = (
                         "Direct MAC lookup returned no exact match and all switch partitions "
                         "were verified successfully."
                     )
                     stats["verified_not_found"] += 1
                 else:
-                    row["status"] = "unresolved"
-                    row["lookup_method"] = "UNRESOLVED"
+                    row["lookup_method"] = "DIRECT_MAC_NOT_FOUND"
+                    row["verification"] = "PARTIAL"
                     note = (
-                        "Direct MAC lookup returned no exact match, but switch-partition "
-                        "verification was incomplete; presence in NetBrain cannot be ruled out."
+                        "Direct MAC lookup returned no exact match. Secondary switch-partition "
+                        "verification was partial; see the runtime log for partition diagnostics."
                     )
-                    stats["unresolved"] += 1
+                    stats["partial_not_found"] += 1
                 row["notes"] = "; ".join(filter(None, (row.get("notes", ""), note)))
+
+        if not verification_complete:
+            log_event(
+                "WARNING",
+                f"Secondary verification was partial: {stats['partitions_complete']} partition(s) complete, "
+                f"{stats['partitions_incomplete']} incomplete. {stats['partial_not_found']} direct MAC miss(es) "
+                "remain NOT FOUND based on the successful primary server-side MAC filter.",
+            )
     else:
         # Every miss was resolved; no negative conclusion depends on completing
         # all remaining switch partitions.
@@ -1826,7 +1936,7 @@ def oneip_lookup(
 ) -> tuple[list[dict[str, str]], list[dict[str, Any]]]:
     """Lookup an IP or MAC in NetBrain's One-IP Table.
 
-    v2.6.1 RC behavior:
+    v2.6.2 RC2 behavior:
       * IP  -> exact server-side ``ip`` filter.
       * MAC -> exact server-side ``mac`` filter. The default representation is
                Cisco dotted-lower (``aaaa.aaaa.aaaa``), verified by diagnostics.
@@ -1864,6 +1974,7 @@ def oneip_lookup(
             rows = useful_rows(target, records, path)
             for row in rows:
                 row["lookup_method"] = "DIRECT_IP"
+                row["verification"] = "PRIMARY"
             if rows:
                 return rows, raw
 
@@ -1909,6 +2020,7 @@ def oneip_lookup(
                     rows = useful_rows(target, records, path)
                     for row in rows:
                         row["lookup_method"] = "DIRECT_MAC"
+                        row["verification"] = "PRIMARY"
                     if rows:
                         return rows, raw
 
@@ -2202,7 +2314,9 @@ def correlate_mac_targets(rows: list[dict[str, str]]) -> None:
                 continue
 
     for row in rows:
-        if row.get("target_type") != "MAC" or row.get("status") == "found":
+        # Only a successful primary query that returned no exact match is eligible
+        # for secondary verification. Primary API errors remain ERROR and are logged.
+        if row.get("target_type") != "MAC" or row.get("status") != "not-found":
             continue
         match = by_mac.get(normalize_mac(row["target"]))
         if not match:
@@ -2391,124 +2505,77 @@ def say(message: str, *, error: bool = False, style: str | None = None) -> None:
 
 
 def debug(message: str) -> None:
-    print(f"[DEBUG] {message}", file=sys.stderr)
+    """Verbose diagnostics go to the runtime log to keep terminal output concise."""
+    log_event("DEBUG", message)
 
 
 def show_banner() -> None:
     width = 68
     say("=" * width, style="green")
-    say("NETBRAIN ENDPOINT LOOKUP".center(width), style="green")
+    say("NETBRAIN_LOOKUP".center(width), style="green")
     say("=" * width, style="green")
 
 
 def display_search_summary(
     rows: list[dict[str, str]],
     output: Path,
+    log_path: Path,
     args: argparse.Namespace,
     fallback_stats: dict[str, int],
 ) -> None:
-    """Display an executive summary of the lookup execution.
-
-    Operational sections use green. Conditions that reduce trust or security
-    are grouped in a yellow WARNING section.
-    """
+    """Display a clean executive summary; detailed warnings/errors go to .log."""
     width = 68
     total = len(rows)
     ip_targets = sum(row.get("target_type") == "IP" for row in rows)
     mac_targets = sum(row.get("target_type") == "MAC" for row in rows)
-    invalid_targets = sum(row.get("target_type") == "INVALID" for row in rows)
 
     found = sum(row.get("status") == "found" for row in rows)
     not_found = sum(row.get("status") == "not-found" for row in rows)
-    unresolved = sum(row.get("status") == "unresolved" for row in rows)
     errors = sum(row.get("status") == "error" for row in rows)
 
-    method_counts = {
-        method: sum(
-            row.get("lookup_method") == method and row.get("status") == "found"
-            for row in rows
-        )
-        for method in (
-            "DIRECT_IP",
-            "DIRECT_MAC",
-            "SWITCH_PARTITION",
-            "IP_CORRELATION",
-            "CONNECTED_SWITCH_PORT",
-            "DEVICE_LOOKUP",
-            "GLOBAL_IP_SCAN",
-        )
-    }
+    direct_mac_found = sum(
+        row.get("status") == "found" and row.get("lookup_method") == "DIRECT_MAC"
+        for row in rows
+    )
+    direct_mac_misses = fallback_stats.get("requested", 0)
 
     say("\n" + "=" * width, style="green")
     say("SEARCH SUMMARY".center(width), style="green")
     say("=" * width, style="green")
 
     say("[+] Input", style="green")
-    say(f"    Total targets        : {total}", style="green")
-    say(f"    IP targets           : {ip_targets}", style="green")
-    say(f"    MAC targets          : {mac_targets}", style="green")
-    if invalid_targets:
-        say(f"    Invalid targets      : {invalid_targets}", style="yellow")
-
-    say("[+] Search Methods", style="green")
-    say(f"    Direct IP            : {method_counts['DIRECT_IP']}", style="green")
-    say(f"    Direct MAC           : {method_counts['DIRECT_MAC']}", style="green")
-    say(f"    Switch Partition     : {method_counts['SWITCH_PARTITION']}", style="green")
-    say(f"    IP Correlation       : {method_counts['IP_CORRELATION']}", style="green")
-    say(f"    Connected Switch Port: {method_counts['CONNECTED_SWITCH_PORT']}", style="green")
-    say(f"    Device Lookup        : {method_counts['DEVICE_LOOKUP']}", style="green")
-    say(f"    Global IP Scan       : {method_counts['GLOBAL_IP_SCAN']}", style="green")
-
-    if fallback_stats.get("requested", 0):
-        say("[+] MAC Verification", style="green")
-        say(f"    Direct misses        : {fallback_stats.get('requested', 0)}", style="green")
-        say(f"    Candidate switches   : {fallback_stats.get('switches', 0)}", style="green")
-        say(f"    Switches scanned     : {fallback_stats.get('scanned', 0)}", style="green")
-        say(f"    Fallback resolved    : {fallback_stats.get('resolved', 0)}", style="green")
-        say(f"    Verified not found   : {fallback_stats.get('verified_not_found', 0)}", style="green")
-        coverage = "COMPLETE" if fallback_stats.get("verification_complete") else "INCOMPLETE"
-        say(
-            f"    Verification coverage: {coverage}",
-            style="green" if coverage == "COMPLETE" else "yellow",
-        )
-        if fallback_stats.get("unresolved", 0):
-            say(f"    Unresolved           : {fallback_stats.get('unresolved', 0)}", style="yellow")
+    say(f"    Total targets          : {total}", style="green")
+    say(f"    IP targets             : {ip_targets}", style="green")
+    say(f"    MAC targets            : {mac_targets}", style="green")
 
     say("[+] Results", style="green")
-    say(f"    Found                : {found}", style="green")
-    say(f"    Not found            : {not_found}", style="green")
-    if unresolved:
-        say(f"    Unresolved           : {unresolved}", style="yellow")
-    if errors:
-        say(f"    Errors               : {errors}", style="yellow")
+    say(f"    Found                  : {found}", style="green")
+    say(f"    Not found              : {not_found}", style="green")
+    say(f"    Errors                 : {errors}", style="green")
+
+    if mac_targets:
+        say("[+] MAC Direct Lookup", style="green")
+        say(f"    Found                  : {direct_mac_found}", style="green")
+        say(f"    Not found              : {direct_mac_misses}", style="green")
+        say(f"    Query format           : {args.mac_style}", style="green")
+        say("    API filter status      : VERIFIED", style="green")
+
+    if fallback_stats.get("requested", 0):
+        coverage = "COMPLETE" if fallback_stats.get("verification_complete") else "PARTIAL"
+        say("[+] Secondary Verification", style="green")
+        say(f"    MACs submitted         : {fallback_stats.get('requested', 0)}", style="green")
+        say(f"    Candidate switches     : {fallback_stats.get('switches', 0)}", style="green")
+        say(f"    Partitions complete    : {fallback_stats.get('partitions_complete', 0)}", style="green")
+        say(f"    Partitions incomplete  : {fallback_stats.get('partitions_incomplete', 0)}", style="green")
+        say(f"    Fallback resolved      : {fallback_stats.get('resolved', 0)}", style="green")
+        say(f"    Fully verified misses  : {fallback_stats.get('verified_not_found', 0)}", style="green")
+        say(f"    Coverage               : {coverage}", style="green")
 
     say("[+] Output", style="green")
-    say(f"    CSV report           : {output.resolve()}", style="green")
+    say(f"    CSV report             : {output.resolve()}", style="green")
+    say(f"    Diagnostic log         : {log_path.resolve()}", style="green")
     if args.raw_json:
-        say(f"    Raw JSON             : {Path(args.raw_json).resolve()}", style="green")
-
-    warnings: list[str] = []
-    if args.insecure:
-        warnings.append("TLS certificate verification is disabled (--insecure).")
-    if fallback_stats.get("failed_switches", 0):
-        warnings.append(
-            f"{fallback_stats['failed_switches']} switch partition(s) could not be fully verified."
-        )
-    if fallback_stats.get("inventory_errors", 0):
-        warnings.append(
-            f"Device inventory returned {fallback_stats['inventory_errors']} pagination/API error(s)."
-        )
-    if fallback_stats.get("pagination_limited", 0):
-        warnings.append(
-            f"{fallback_stats['pagination_limited']} switch partition(s) reached the 20,000-row safety boundary."
-        )
-    if args.raw_json:
-        warnings.append("Raw JSON can contain live network data; sanitize it before sharing.")
-
-    if warnings:
-        say("[!] WARNING", style="yellow")
-        for warning in warnings:
-            say(f"    {warning}", style="yellow")
+        say(f"    Raw JSON               : {Path(args.raw_json).resolve()}", style="green")
 
     say("=" * width, style="green")
 
@@ -2534,8 +2601,8 @@ def display_results(rows: list[dict[str, str]]) -> None:
             table.add_column(heading, no_wrap=True, overflow="ellipsis")
         for row in rows:
             status = row["status"]
-            label = {"found": "FOUND", "not-found": "NOT FOUND", "unresolved": "UNRESOLVED", "error": "ERROR"}.get(status, status.upper())
-            color = {"found": "green", "not-found": "yellow", "unresolved": "yellow", "error": "red"}.get(status, "")
+            label = {"found": "FOUND", "not-found": "NOT FOUND", "error": "ERROR"}.get(status, status.upper())
+            color = {"found": "green", "not-found": "yellow", "error": "red"}.get(status, "")
             values = [row.get(key, "") for _, key in columns]
             values[2] = Text(label, style=color)
             if row.get("target_type") == "INVALID":
@@ -2547,14 +2614,18 @@ def display_results(rows: list[dict[str, str]]) -> None:
     say(" | ".join(heading for heading, _ in columns))
     for row in rows:
         values = [row.get(key, "") for _, key in columns]
-        values[2] = {"found": "FOUND", "not-found": "NOT FOUND", "unresolved": "UNRESOLVED", "error": "ERROR"}.get(
+        values[2] = {"found": "FOUND", "not-found": "NOT FOUND", "error": "ERROR"}.get(
             row["status"], row["status"].upper()
         )
         say(" | ".join(values))
 
 
 def report_error(message: str, code: int) -> int:
-    say(message, error=True)
+    log_event("ERROR", message)
+    if LOG_PATH is not None:
+        say(f"[-] Operation failed. Details were written to: {LOG_PATH.resolve()}", error=True)
+    else:
+        say("[-] Operation failed.", error=True)
     return code
 
 
