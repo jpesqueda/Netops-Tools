@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Portdeco.py - AP Decommission Port Validator, Config Generator & PRE/POST Checker
+Portdeco.py - Port Decommission Validator, Config Generator & PRE/POST Checker
 
 Purpose
 -------
@@ -240,6 +240,7 @@ def parse_args() -> argparse.Namespace:
 Safety:
   Omitting --password is recommended; Portdeco prompts securely with getpass.
   Device sessions only execute commands beginning with "show ".
+  SSH host-key files (known_hosts) are not used by this tool.
 """,
     )
 
@@ -258,7 +259,6 @@ Safety:
     )
     parser.add_argument("--workers", type=int, default=5)
     parser.add_argument("--timeout", type=int, default=30)
-    parser.add_argument("--insecure", action="store_true", help="Relax SSH host-key behavior where applicable")
 
     parser.add_argument("--checks", action="store_true", help="Run PRE/POST evidence collection mode")
     parser.add_argument("--check-type", choices=["pre", "post"], help="Skip menu and choose PRE or POST checks")
@@ -700,8 +700,14 @@ def send_read_only_command(connection, command: str, *, read_timeout: int = 60) 
     return connection.send_command(command, read_timeout=read_timeout)
 
 
-def connection_params(switch: str, username: str, password: str, timeout: int, insecure: bool) -> dict:
-    """Build Netmiko connection parameters for a Cisco IOS/IOS-XE switch."""
+def connection_params(switch: str, username: str, password: str, timeout: int) -> dict:
+    """Build Netmiko connection parameters for a Cisco IOS/IOS-XE switch.
+
+    Netmiko uses Paramiko as its SSH transport by default. This tool deliberately
+    disables SSH host-key file validation so it does not read or require entries
+    from the user's ``known_hosts`` file. Authentication still uses the supplied
+    username/password credentials.
+    """
     return {
         "device_type": "cisco_ios",
         "host": switch,
@@ -710,8 +716,10 @@ def connection_params(switch: str, username: str, password: str, timeout: int, i
         "conn_timeout": timeout,
         "banner_timeout": timeout,
         "auth_timeout": timeout,
-        "ssh_strict": not insecure,
-        "system_host_keys": not insecure,
+        # Do not consult ~/.ssh/known_hosts or system SSH host-key files.
+        # This avoids first-connect failures for switches that are not pre-registered.
+        "ssh_strict": False,
+        "system_host_keys": False,
         "alt_host_keys": False,
         "fast_cli": False,
     }
@@ -839,7 +847,6 @@ def process_switch(
     username: str,
     password: str,
     timeout: int,
-    insecure: bool,
     template: str,
     logger: logging.Logger,
 ) -> list[PortResult]:
@@ -854,7 +861,7 @@ def process_switch(
     connection = None
     try:
         logger.info("Connecting to switch %s", switch)
-        connection = ConnectHandler(**connection_params(switch, username, password, timeout, insecure))
+        connection = ConnectHandler(**connection_params(switch, username, password, timeout))
         show_status = send_read_only_command(connection, "show interfaces status")
 
         for record in records:
@@ -1067,7 +1074,6 @@ def capture_switch_checks(
     username: str,
     password: str,
     timeout: int,
-    insecure: bool,
     check_type: str,
     backup: bool,
     run_dir: Path,
@@ -1084,7 +1090,7 @@ def capture_switch_checks(
     switch_file = run_dir / f"{sanitize_filename(switch)}_{check_type}.txt"
     backup_file: Path | None = None
     try:
-        connection = ConnectHandler(**connection_params(switch, username, password, timeout, insecure))
+        connection = ConnectHandler(**connection_params(switch, username, password, timeout))
         show_clock = send_read_only_command(connection, "show clock")
         try:
             uptime = send_read_only_command(connection, "show version | include uptime")
@@ -1658,7 +1664,6 @@ def run_checks(args: argparse.Namespace, records: list[InputRecord], password: s
                 username=args.username,
                 password=password,
                 timeout=args.timeout,
-                insecure=args.insecure,
                 check_type=check_type,
                 backup=args.backup,
                 run_dir=run_dir,
@@ -1743,7 +1748,6 @@ def run_normal(args: argparse.Namespace, records: list[InputRecord], password: s
                 username=args.username,
                 password=password,
                 timeout=args.timeout,
-                insecure=args.insecure,
                 template=template,
                 logger=logger,
             ): switch
