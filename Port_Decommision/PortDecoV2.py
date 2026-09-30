@@ -581,20 +581,57 @@ def load_and_validate_template(path: Path) -> str:
 # ==============================================================================
 # SECTION 06 - CISCO OUTPUT PARSING
 # ==============================================================================
-def parse_interface_status(show_status: str, target_port: str) -> str:
-    """Map one interface from `show interfaces status` to the internal status enum.
-    
-    The parser accepts both long and short interface naming and fails closed to
-    UNKNOWN/NOT_FOUND when the state cannot be established safely."""
+def interface_token_matches(candidate: str, target_port: str) -> bool:
+    """Safely determine whether a CLI token represents the requested interface.
+
+    Cisco ``show interfaces status`` output contains non-interface tokens such as
+    the column header ``Port`` and, depending on the platform/session, separator
+    or pagination text. Those values must never be passed blindly to
+    ``normalize_interface_name()`` because they are not valid interface names.
+
+    This helper normalizes both the requested interface and a candidate token,
+    but treats an invalid candidate as a simple non-match rather than as a parser
+    failure. This keeps status parsing resilient while preserving strict
+    validation for interface values originating from hosts.csv.
+    """
     target_long = normalize_interface_name(target_port).lower()
-    target_short = interface_short_name(target_port).lower()
+    target_short = interface_short_name(normalize_interface_name(target_port)).lower()
+
+    candidate_clean = (candidate or "").strip().rstrip(",:")
+    if not candidate_clean:
+        return False
+
+    # Fast path for the common abbreviated form returned by IOS/IOS-XE.
+    if candidate_clean.lower() == target_short:
+        return True
+
+    # Header text such as "Port" or any other non-interface token is ignored.
+    try:
+        candidate_long = normalize_interface_name(candidate_clean).lower()
+    except ValueError:
+        return False
+
+    return candidate_long == target_long
+
+
+def parse_interface_status(show_status: str, target_port: str) -> str:
+    """Map one interface from ``show interfaces status`` to the internal status enum.
+
+    The parser accepts both long and short interface naming. Non-interface lines
+    such as headers are ignored safely instead of being treated as malformed
+    interface names. If the requested port is not present, ``NOT_FOUND`` is
+    returned; if the line is found but its state is unfamiliar, ``UNKNOWN`` is
+    returned.
+    """
     for raw_line in show_status.splitlines():
         line = raw_line.strip()
         if not line:
             continue
+
         first = line.split()[0]
-        if normalize_interface_name(first).lower() != target_long and first.lower() != target_short:
+        if not interface_token_matches(first, target_port):
             continue
+
         low = line.lower()
         if re.search(r"\berr-?disabled\b", low):
             return PORT_ERR_DISABLED
@@ -605,21 +642,21 @@ def parse_interface_status(show_status: str, target_port: str) -> str:
         if re.search(r"\bdisabled\b", low):
             return PORT_ADMIN_DOWN
         return PORT_UNKNOWN
+
     return PORT_NOT_FOUND
 
 
 def extract_status_line(show_status: str, target_port: str) -> str:
-    """Return the raw matching line from `show interfaces status` for evidence files."""
-    target_long = normalize_interface_name(target_port).lower()
-    target_short = interface_short_name(target_port).lower()
+    """Return the raw matching status line while safely ignoring CLI headers."""
     for raw in show_status.splitlines():
         line = raw.rstrip()
         parts = line.split()
         if not parts:
             continue
-        first = parts[0]
-        if normalize_interface_name(first).lower() == target_long or first.lower() == target_short:
+
+        if interface_token_matches(parts[0], target_port):
             return line
+
     return "PORT NOT FOUND IN show interfaces status"
 
 
