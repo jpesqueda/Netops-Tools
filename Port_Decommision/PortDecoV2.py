@@ -46,6 +46,20 @@ Commands such as "config t", "default interface", "shutdown", and "end" may
 appear only inside locally generated configuration files. They are never sent
 to a switch by this program.
 
+Maintenance Guidelines
+----------------------
+- Keep VLAN reconciliation logic centralized in determine_final_vlan() and
+  reconcile_vlan_information(). Do not duplicate VLAN decision logic elsewhere.
+- Keep configuration-safety decisions centralized in should_comment_configuration().
+- Any new device command MUST remain read-only and MUST be executed through
+  send_read_only_command().
+- Treat the Port_Status.csv column set as a versioned external interface.
+  Version 2.2 adds Expected MAC, Detected MAC, and MAC Check columns.
+- If snapshot JSON structure changes, increment the snapshot schema and maintain
+  backward-compatibility logic where practical.
+- HTML output is intentionally self-contained (HTML/CSS/JavaScript in one file)
+  so reports can be opened locally without a web server.
+
 Author: Peskicorp
 Python: 3.10+
 Version: 2.1.0
@@ -104,7 +118,7 @@ from rich.text import Text
 # ==============================================================================
 TOOL_NAME = "Portdeco - PORT Decommission Validator"
 AUTHOR = "Peskicorp"
-VERSION = "2.1.0"
+VERSION = "2.2.0"
 DEFAULT_ACCESS_VLAN = "1"
 
 PORT_CONNECTED = "CONNECTED"
@@ -114,6 +128,11 @@ PORT_ERR_DISABLED = "ERR_DISABLED"
 PORT_NOT_FOUND = "NOT_FOUND"
 PORT_ERROR = "ERROR"
 PORT_UNKNOWN = "UNKNOWN"
+
+MAC_MATCH = "MATCH"
+MAC_NOT_FOUND = "NOT_FOUND"
+MAC_MISMATCH = "MISMATCH"
+MAC_UNABLE_TO_VALIDATE = "UNABLE_TO_VALIDATE"
 
 ACCESS_OK = {"MATCH", "DEFAULT_CONFIRMED", "CONFIG_MISSING_OPERATIONAL_FOUND"}
 VOICE_OK = {"MATCH", "NONE_CONFIRMED", "VOICE_CONFIG_MISSING"}
@@ -195,6 +214,7 @@ class PortResult:
     port: str
     expected_mac: str
     detected_macs: list[str] = field(default_factory=list)
+    mac_validation: str = MAC_UNABLE_TO_VALIDATE
     description: str = ""
     configured_access_vlan: str = "UNKNOWN"
     operational_access_vlan: str = "UNKNOWN"
@@ -894,6 +914,30 @@ def parse_mac_table(output: str) -> list[str]:
     return found
 
 
+def validate_expected_mac(expected_mac: str, detected_macs: list[str]) -> str:
+    """Compare the CSV MAC against MAC addresses learned on the switch port.
+
+    Returns:
+        MATCH: the expected MAC is present in the learned MAC list.
+        NOT_FOUND: no MAC addresses are currently learned on the interface.
+        MISMATCH: MAC addresses are learned, but the expected MAC is absent.
+        UNABLE_TO_VALIDATE: reserved for cases where the MAC-table command fails.
+
+    MAC validation is reported independently from port/VLAN configuration safety.
+    It does not automatically activate or suppress a generated config block.
+    """
+    if not detected_macs:
+        return MAC_NOT_FOUND
+    if expected_mac in detected_macs:
+        return MAC_MATCH
+    return MAC_MISMATCH
+
+
+def format_detected_macs(detected_macs: list[str]) -> str:
+    """Return a concise, CSV/console-friendly representation of learned MACs."""
+    return ", ".join(detected_macs) if detected_macs else "NONE"
+
+
 def command_error(output: str) -> bool:
     """Detect common Cisco CLI error text in command output."""
     low = (output or "").lower()
@@ -1024,7 +1068,8 @@ def log_port_details(logger: logging.Logger, result: PortResult) -> None:
         f"Switch: {result.switch}",
         f"Port: {result.port}",
         f"Expected MAC: {result.expected_mac}",
-        f"Detected MAC: {', '.join(result.detected_macs) if result.detected_macs else 'NONE'}",
+        f"Detected MAC: {format_detected_macs(result.detected_macs)}",
+        f"MAC Validation: {result.mac_validation}",
         f"Expected MAC Present: {expected_present}",
         f"Configured Access VLAN: {result.configured_access_vlan}",
         f"Operational Access VLAN: {result.operational_access_vlan}",
@@ -1121,6 +1166,7 @@ def process_switch(
                         result.port_status = PORT_UNKNOWN
                     else:
                         result.warning = "PORT NOT FOUND - NO CONFIG GENERATED"
+                        result.mac_validation = MAC_NOT_FOUND
                         result.config_mode = "NONE"
                         log_port_details(logger, result)
                         results.append(result)
@@ -1139,7 +1185,8 @@ def process_switch(
                 )
 
                 mac_output = send_read_only_command(connection, f"show mac address-table interface {record.port}")
-                detected_macs = [] if command_error(mac_output) else parse_mac_table(mac_output)
+                mac_command_failed = command_error(mac_output)
+                detected_macs = [] if mac_command_failed else parse_mac_table(mac_output)
 
                 result.description = run_info.description
                 result.configured_access_vlan = run_info.configured_access_vlan
@@ -1147,6 +1194,11 @@ def process_switch(
                 result.configured_voice_vlan = run_info.configured_voice_vlan
                 result.operational_voice_vlan = sw_info.operational_voice_vlan
                 result.detected_macs = detected_macs
+                result.mac_validation = (
+                    MAC_UNABLE_TO_VALIDATE
+                    if mac_command_failed
+                    else validate_expected_mac(result.expected_mac, result.detected_macs)
+                )
 
                 # Reconcile configured and operational VLAN data before any local
                 # configuration text is generated. This is a mandatory safety gate.
@@ -1253,12 +1305,30 @@ def write_config_file(path: Path, results: Iterable[PortResult], switch_order: l
 
 
 def write_status_csv(path: Path, results: Iterable[PortResult]) -> None:
-    """Write the intentionally minimal Port_Status.csv external report."""
+    """Write Port_Status.csv including endpoint MAC validation results."""
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle)
-        writer.writerow(["Switch", "Port", "Access Vlan", "Voice Vlan", "PortStatus"])
+        writer.writerow([
+            "Switch",
+            "Port",
+            "Access Vlan",
+            "Voice Vlan",
+            "PortStatus",
+            "Expected MAC",
+            "Detected MAC",
+            "MAC Check",
+        ])
         for r in results:
-            writer.writerow([r.switch, r.port, r.final_access_vlan, r.final_voice_vlan, r.port_status])
+            writer.writerow([
+                r.switch,
+                r.port,
+                r.final_access_vlan,
+                r.final_voice_vlan,
+                r.port_status,
+                r.expected_mac,
+                format_detected_macs(r.detected_macs),
+                r.mac_validation,
+            ])
 
 
 def print_main_banner() -> None:
@@ -1284,10 +1354,27 @@ def make_switch_table(switch: str, results: list[PortResult]) -> Table:
     table.add_column("Access Vlan")
     table.add_column("Voice Vlan")
     table.add_column("Port Status")
+    table.add_column("Expected MAC")
+    table.add_column("Detected MAC")
+    table.add_column("MAC Check")
     table.add_column("Warning")
     for r in results:
         warning = r.warning or (f"ERROR: {r.error}" if r.error else "")
-        table.add_row(r.port, r.final_access_vlan, r.final_voice_vlan, r.port_status, warning)
+        mac_style = (
+            "bold green" if r.mac_validation == MAC_MATCH
+            else "bold red" if r.mac_validation == MAC_MISMATCH
+            else "bold yellow"
+        )
+        table.add_row(
+            r.port,
+            r.final_access_vlan,
+            r.final_voice_vlan,
+            r.port_status,
+            r.expected_mac,
+            format_detected_macs(r.detected_macs),
+            f"[{mac_style}]{r.mac_validation}[/]",
+            warning,
+        )
     return table
 
 
