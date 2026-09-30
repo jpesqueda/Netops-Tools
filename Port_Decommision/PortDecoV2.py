@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Portdeco.py - Port Decommission Validator, Config Generator & PRE/POST Checker
+Portdeco.py - PORT Decommission Validator, Config Generator & PRE/POST Checker
 
 Purpose
 -------
@@ -14,7 +14,7 @@ Side-by-Side PRE/POST comparison report.
 Primary Workflows
 -----------------
 1. NORMAL VALIDATION / CONFIG GENERATION
-   - Read Switch,Port,MAC records from CSV.
+   - Read switch/port/MAC records from CSV using tolerant English/Spanish header aliases.
    - Connect once per switch.
    - Collect read-only operational data.
    - Reconcile configured and operational Access/Voice VLANs.
@@ -46,9 +46,23 @@ Commands such as "config t", "default interface", "shutdown", and "end" may
 appear only inside locally generated configuration files. They are never sent
 to a switch by this program.
 
+Maintenance Guidelines
+----------------------
+- Keep VLAN reconciliation logic centralized in determine_final_vlan() and
+  reconcile_vlan_information(). Do not duplicate VLAN decision logic elsewhere.
+- Keep configuration-safety decisions centralized in should_comment_configuration().
+- Any new device command MUST remain read-only and MUST be executed through
+  send_read_only_command().
+- Preserve the exact Port_Status.csv headers unless the external interface is
+  intentionally versioned.
+- If snapshot JSON structure changes, increment the snapshot schema and maintain
+  backward-compatibility logic where practical.
+- HTML output is intentionally self-contained (HTML/CSS/JavaScript in one file)
+  so reports can be opened locally without a web server.
+
 Author: Peskicorp
 Python: 3.10+
-Version: 2.0.0
+Version: 2.1.0
 
 Runtime Requirements
 --------------------
@@ -81,20 +95,30 @@ from typing import Iterable
 
 try:
     from netmiko import ConnectHandler
+    from netmiko.exceptions import NetmikoAuthenticationException, NetmikoTimeoutException
 except ImportError:  # Allows --help/--version without installed runtime dependency.
     ConnectHandler = None
+
+    class NetmikoAuthenticationException(Exception):
+        """Fallback placeholder used only when Netmiko is unavailable."""
+
+    class NetmikoTimeoutException(Exception):
+        """Fallback placeholder used only when Netmiko is unavailable."""
+
+from rich.align import Align
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
+from rich.text import Text
 
 
 
 # ==============================================================================
 # SECTION 02 - GLOBAL CONSTANTS AND SAFETY ENUMERATIONS
 # ==============================================================================
-TOOL_NAME = "Portdeco - AP Decommission Port Validator"
+TOOL_NAME = "Portdeco - PORT Decommission Validator"
 AUTHOR = "Peskicorp"
-VERSION = "2.0.0"
+VERSION = "2.1.0"
 DEFAULT_ACCESS_VLAN = "1"
 
 PORT_CONNECTED = "CONNECTED"
@@ -111,6 +135,20 @@ VOICE_OK = {"MATCH", "NONE_CONFIRMED", "VOICE_CONFIG_MISSING"}
 console = Console()
 
 
+class DeviceConnectionError(RuntimeError):
+    """Represent a switch-level SSH connection or authentication failure.
+
+    Raising a dedicated exception lets the normal workflow abort transactionally:
+    if any requested switch cannot be authenticated or reached, configuration and
+    status output files are not generated for that run.
+    """
+
+    def __init__(self, switch: str, category: str, detail: str):
+        self.switch = switch
+        self.category = category
+        self.detail = detail
+        super().__init__(f"{switch}: {category}: {detail}")
+
 
 
 # ==============================================================================
@@ -118,7 +156,7 @@ console = Console()
 # ==============================================================================
 @dataclass(frozen=True)
 class InputRecord:
-    """One validated CSV input row identifying a switch, interface, and expected AP MAC."""
+    """One validated CSV input row identifying a switch, interface, and expected endpoint MAC."""
     switch: str
     port: str
     mac: str
@@ -220,7 +258,7 @@ def parse_args() -> argparse.Namespace:
     workflow functions can assume a coherent argument set."""
     parser = argparse.ArgumentParser(
         description=(
-            "Read-only Cisco AP decommission validator/config generator with PRE/POST "
+            "Read-only Cisco port decommission validator/config generator with PRE/POST "
             "checks, running-config backups, and consolidated HTML Side-by-Side diff."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -316,22 +354,88 @@ def normalize_mac(value: str) -> str:
 
 
 def normalize_interface_name(name: str) -> str:
-    """Normalize common Cisco interface abbreviations to canonical long names.
-    
-    This keeps CSV input flexible while giving downstream comparison and reporting
-    logic one consistent representation."""
+    """Normalize and validate common Cisco interface names safely.
+
+    The previous implementation used a regular-expression alternation such as
+    ``(?:gi|gig|gigabitethernet)``.  Because regex alternations are evaluated
+    left-to-right, a full name like ``GigabitEthernet1/1/1`` matched the short
+    ``gi`` prefix first and produced an invalid duplicated name such as
+    ``GigabitEthernetgabitEthernet1/1/1``.
+
+    This implementation avoids partial-prefix replacement entirely.  It splits
+    the interface into an alphabetic interface type and a numeric interface ID,
+    then maps the complete interface type to one canonical Cisco name.
+
+    Accepted examples include::
+
+        Gi1/0/1
+        Gig1/0/1
+        GigabitEthernet1/0/1
+        Te1/0/1
+        TenGigabitEthernet1/0/1
+        TwentyFiveGigE1/0/1
+        Fo1/0/1
+        FortyGigabitEthernet1/0/1
+        Hu1/0/1
+        HundredGigabitEthernet1/0/1
+
+    A malformed or unsupported interface raises ``ValueError`` instead of being
+    silently passed to a Cisco show command.
+    """
     raw = re.sub(r"\s+", "", (name or "").strip())
-    patterns = [
-        (r"^(?:gi|gig|gigabitethernet)(.+)$", r"GigabitEthernet\1"),
-        (r"^(?:te|ten|tengig|tengigabitethernet)(.+)$", r"TenGigabitEthernet\1"),
-        (r"^(?:tw|twentyfivegige)(.+)$", r"TwentyFiveGigE\1"),
-        (r"^(?:fo|fortygigabitethernet)(.+)$", r"FortyGigabitEthernet\1"),
-        (r"^(?:hu|hundredgigabitethernet)(.+)$", r"HundredGigabitEthernet\1"),
-    ]
-    for pattern, replacement in patterns:
-        if re.match(pattern, raw, flags=re.IGNORECASE):
-            return re.sub(pattern, replacement, raw, flags=re.IGNORECASE)
-    return raw
+    if not raw:
+        raise ValueError("Interface name cannot be empty")
+
+    # Split the complete interface type from the numeric interface identifier.
+    # Requiring the suffix to begin with a digit prevents partial-prefix matches.
+    match = re.fullmatch(r"([A-Za-z][A-Za-z-]*)(\d+(?:/\d+)*(?:\.\d+)?)", raw)
+    if not match:
+        raise ValueError(f"Invalid Cisco interface format: {name!r}")
+
+    interface_type, interface_id = match.groups()
+    key = interface_type.lower()
+
+    # IMPORTANT: keys represent complete interface-type tokens, not prefixes.
+    aliases = {
+        # Gigabit Ethernet
+        "gi": "GigabitEthernet",
+        "gig": "GigabitEthernet",
+        "gigabit": "GigabitEthernet",
+        "gigabitethernet": "GigabitEthernet",
+
+        # Ten Gigabit Ethernet
+        "te": "TenGigabitEthernet",
+        "ten": "TenGigabitEthernet",
+        "tengig": "TenGigabitEthernet",
+        "tengigabitethernet": "TenGigabitEthernet",
+
+        # Twenty-Five Gigabit Ethernet
+        "tw": "TwentyFiveGigE",
+        "twe": "TwentyFiveGigE",
+        "twentyfivegige": "TwentyFiveGigE",
+        "twentyfivegigabitethernet": "TwentyFiveGigE",
+
+        # Forty Gigabit Ethernet
+        "fo": "FortyGigabitEthernet",
+        "fortygigabitethernet": "FortyGigabitEthernet",
+
+        # Hundred Gigabit Ethernet
+        "hu": "HundredGigabitEthernet",
+        "hundredgige": "HundredGigabitEthernet",
+        "hundredgigabitethernet": "HundredGigabitEthernet",
+
+        # Common legacy/access interface types.
+        "fa": "FastEthernet",
+        "fastethernet": "FastEthernet",
+        "eth": "Ethernet",
+        "ethernet": "Ethernet",
+    }
+
+    canonical_type = aliases.get(key)
+    if canonical_type is None:
+        raise ValueError(f"Unsupported Cisco interface type: {interface_type!r}")
+
+    return f"{canonical_type}{interface_id}"
 
 
 def interface_short_name(name: str) -> str:
@@ -349,31 +453,115 @@ def interface_short_name(name: str) -> str:
     return name
 
 
+def normalize_csv_header(value: str) -> str:
+    """Normalize a CSV header for tolerant, case-insensitive alias matching.
+
+    Spaces, underscores, and hyphens are ignored. This allows operational teams
+    to use common English or Spanish column names without changing the internal
+    data model.
+    """
+    return re.sub(r"[\s_-]+", "", (value or "").strip().lower())
+
+
 def read_hosts_csv(path: Path) -> list[InputRecord]:
-    """Load and validate the input inventory CSV.
-    
-    The external CSV contract is intentionally strict: exact headers are
-    Switch,Port,MAC. Duplicate switch/port pairs and invalid MAC addresses are
-    rejected before any network connection is attempted."""
+    """Load and validate the input inventory CSV with tolerant header aliases.
+
+    Required semantic fields are Switch, Port, and MAC, but the physical CSV
+    headers are case-insensitive and may use supported aliases. Examples:
+
+        Switch,Port,MAC
+        switch,port,mac
+        SWITCH,PORT,MAC
+        switch,puerto,MAC
+        hostname,interface,mac_address
+
+    Supported aliases:
+        Switch -> switch, hostname, host, device, equipo
+        Port   -> port, puerto, interface, interfaz
+        MAC    -> mac, macaddress, direccionmac, direcciónmac
+
+    Duplicate switch/port pairs and invalid MAC/interface values are rejected
+    before any network connection is attempted.
+    """
     if not path.is_file():
         raise FileNotFoundError(f"Hosts CSV not found: {path}")
+
     records: list[InputRecord] = []
     seen: set[tuple[str, str]] = set()
+
+    alias_to_semantic = {
+        # Switch/device column aliases.
+        "switch": "Switch",
+        "hostname": "Switch",
+        "host": "Switch",
+        "device": "Switch",
+        "equipo": "Switch",
+
+        # Interface/port column aliases.
+        "port": "Port",
+        "puerto": "Port",
+        "interface": "Port",
+        "interfaz": "Port",
+
+        # MAC-address column aliases.
+        "mac": "MAC",
+        "macaddress": "MAC",
+        "direccionmac": "MAC",
+        "direcciónmac": "MAC",
+    }
+
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
-        if reader.fieldnames != ["Switch", "Port", "MAC"]:
-            raise ValueError("hosts.csv must have exact headers: Switch,Port,MAC")
+        if not reader.fieldnames:
+            raise ValueError("hosts.csv is empty or does not contain a header row")
+
+        columns: dict[str, str] = {}
+        for original_header in reader.fieldnames:
+            normalized = normalize_csv_header(original_header)
+            semantic = alias_to_semantic.get(normalized)
+            if semantic is None:
+                # Extra columns are intentionally ignored. This keeps the input
+                # tolerant while preserving only the three fields the tool needs.
+                continue
+            if semantic in columns:
+                raise ValueError(
+                    f"hosts.csv contains multiple columns mapped to {semantic}: "
+                    f"{columns[semantic]!r} and {original_header!r}"
+                )
+            columns[semantic] = original_header
+
+        missing = [name for name in ("Switch", "Port", "MAC") if name not in columns]
+        if missing:
+            raise ValueError(
+                "hosts.csv is missing required column(s): "
+                + ", ".join(missing)
+                + ". Accepted examples: Switch,Port,MAC or switch,puerto,MAC"
+            )
+
         for line_no, row in enumerate(reader, start=2):
-            switch = (row.get("Switch") or "").strip()
-            port = normalize_interface_name(row.get("Port") or "")
-            mac = normalize_mac(row.get("MAC") or "")
-            if not switch or not port:
-                raise ValueError(f"Line {line_no}: Switch and Port are required")
+            switch = (row.get(columns["Switch"]) or "").strip()
+            raw_port = (row.get(columns["Port"]) or "").strip()
+            raw_mac = (row.get(columns["MAC"]) or "").strip()
+
+            if not switch:
+                raise ValueError(f"Line {line_no}: Switch/hostname is required")
+
+            try:
+                port = normalize_interface_name(raw_port)
+            except ValueError as exc:
+                raise ValueError(f"Line {line_no}: {exc}") from exc
+
+            try:
+                mac = normalize_mac(raw_mac)
+            except ValueError as exc:
+                raise ValueError(f"Line {line_no}: {exc}") from exc
+
             key = (switch.lower(), port.lower())
             if key in seen:
                 raise ValueError(f"Line {line_no}: duplicate Switch/Port: {switch},{port}")
             seen.add(key)
             records.append(InputRecord(switch=switch, port=port, mac=mac))
+
     if not records:
         raise ValueError("hosts.csv contains no data rows")
     return records
@@ -851,17 +1039,53 @@ def process_switch(
     logger: logging.Logger,
 ) -> list[PortResult]:
     """Process all requested ports on one switch using a single SSH connection.
-    
-    The function collects status, running-config, switchport, and MAC data; performs
-    VLAN reconciliation; applies fail-closed safety decisions; and prepares the local
-    configuration block. Different switches are processed concurrently by the caller."""
-    # Keep one SSH session per switch. This reduces authentication overhead and
-    # ensures all ports on the same device are observed within the same run window.
+
+    Connection establishment is treated separately from command processing. If
+    authentication or SSH connection creation fails, ``DeviceConnectionError`` is
+    raised to the parent workflow. The parent then aborts the run and intentionally
+    does not generate Decommission_Config.txt or Port_Status.csv.
+
+    After a successful connection, individual command/port failures remain visible
+    as ERROR results so a connected device can still be audited safely.
+    """
     results: list[PortResult] = []
     connection = None
+
+    # --------------------------------------------------------------------------
+    # Connection phase: fail the complete normal-mode run if a requested switch
+    # cannot be authenticated or reached. Partial implementation files are unsafe.
+    # --------------------------------------------------------------------------
+    logger.info("Connecting to switch %s", switch)
     try:
-        logger.info("Connecting to switch %s", switch)
         connection = ConnectHandler(**connection_params(switch, username, password, timeout))
+    except NetmikoAuthenticationException as exc:
+        logger.error("Authentication failed for %s: %s", switch, exc)
+        raise DeviceConnectionError(
+            switch,
+            "AUTHENTICATION FAILED",
+            "The switch rejected the supplied SSH credentials. Verify username, password, and AAA access.",
+        ) from exc
+    except NetmikoTimeoutException as exc:
+        logger.error("Connection timeout for %s: %s", switch, exc)
+        raise DeviceConnectionError(
+            switch,
+            "CONNECTION TIMEOUT",
+            "The switch did not establish an SSH session before the timeout. Verify reachability, DNS/IP, SSH, and firewall path.",
+        ) from exc
+    except Exception as exc:
+        # Some SSH/library versions may surface authentication failures through a
+        # lower-level exception. Classify common credential wording professionally.
+        detail_lower = str(exc).lower()
+        if any(token in detail_lower for token in ("auth", "credential", "password", "permission denied")):
+            category = "AUTHENTICATION FAILED"
+            detail = "SSH authentication could not be completed. Verify username, password, and AAA access."
+        else:
+            category = "CONNECTION FAILED"
+            detail = "SSH connection creation failed. Verify hostname/IP, reachability, SSH service, and network path."
+        logger.exception("Connection creation failed for %s", switch)
+        raise DeviceConnectionError(switch, category, detail) from exc
+
+    try:
         show_status = send_read_only_command(connection, "show interfaces status")
 
         for record in records:
@@ -885,7 +1109,11 @@ def process_switch(
                 run_info = parse_running_interface_config(run_output)
 
                 sw_output = get_switchport_output(connection, record.port)
-                sw_info = SwitchportInfo(raw=sw_output) if command_error(sw_output) or not sw_output.strip() else parse_switchport_output(sw_output)
+                sw_info = (
+                    SwitchportInfo(raw=sw_output)
+                    if command_error(sw_output) or not sw_output.strip()
+                    else parse_switchport_output(sw_output)
+                )
 
                 mac_output = send_read_only_command(connection, f"show mac address-table interface {record.port}")
                 detected_macs = [] if command_error(mac_output) else parse_mac_table(mac_output)
@@ -918,7 +1146,11 @@ def process_switch(
                 else:
                     # Fail closed: anything outside explicitly safe port/VLAN states
                     # remains visible in the output file but is fully commented.
-                    commented = should_comment_configuration(result.port_status, result.access_validation, result.voice_validation)
+                    commented = should_comment_configuration(
+                        result.port_status,
+                        result.access_validation,
+                        result.voice_validation,
+                    )
                     result.config_block = build_config_block(result, template, commented)
                     result.config_mode = "COMMENTED" if commented else "ACTIVE"
 
@@ -933,7 +1165,9 @@ def process_switch(
             results.append(result)
 
     except Exception as exc:
-        logger.exception("Switch-level failure on %s", switch)
+        # The SSH session exists, but a switch-level command failed. Preserve the
+        # condition as ERROR results instead of misreporting it as bad credentials.
+        logger.exception("Switch-level command failure on %s", switch)
         results = []
         for record in records:
             result = PortResult(
@@ -942,7 +1176,7 @@ def process_switch(
                 expected_mac=record.mac,
                 port_status=PORT_ERROR,
                 error=str(exc),
-                warning="SWITCH CONNECTION/COMMAND ERROR - NO CONFIG GENERATED",
+                warning="SWITCH COMMAND ERROR - NO CONFIG GENERATED",
                 config_mode="NONE",
             )
             log_port_details(logger, result)
@@ -953,8 +1187,8 @@ def process_switch(
                 connection.disconnect()
             except Exception:
                 logger.debug("Disconnect failed for %s", switch, exc_info=True)
-    return results
 
+    return results
 
 
 
@@ -1002,6 +1236,22 @@ def write_status_csv(path: Path, results: Iterable[PortResult]) -> None:
         writer.writerow(["Switch", "Port", "Access Vlan", "Voice Vlan", "PortStatus"])
         for r in results:
             writer.writerow([r.switch, r.port, r.final_access_vlan, r.final_voice_vlan, r.port_status])
+
+
+def print_main_banner() -> None:
+    """Render a larger, centered normal-mode application banner."""
+    banner = Text(justify="center")
+    banner.append("PORT DECOMMISSION\n", style="bold bright_white")
+    banner.append("VALIDATOR", style="bold bright_cyan")
+    width = min(84, max(44, console.size.width - 2))
+    console.print(
+        Panel(
+            Align.center(banner),
+            width=width,
+            padding=(1, 3),
+            border_style="bright_blue",
+        )
+    )
 
 
 def make_switch_table(switch: str, results: list[PortResult]) -> Table:
@@ -1728,7 +1978,13 @@ def run_checks(args: argparse.Namespace, records: list[InputRecord], password: s
 # SECTION 18 - NORMAL VALIDATION / CONFIG-GENERATION WORKFLOW
 # ==============================================================================
 def run_normal(args: argparse.Namespace, records: list[InputRecord], password: str, logger: logging.Logger) -> int:
-    """Orchestrate the standard validation and configuration-generation workflow."""
+    """Orchestrate normal validation/config generation as an all-or-nothing run.
+
+    Configuration and status files are written only after every requested switch
+    successfully establishes an SSH session. If any switch fails authentication or
+    connection creation, the run is aborted and neither output file is generated or
+    modified. The detailed failure remains available in Port_decommission.log.
+    """
     template = load_and_validate_template(Path(args.template))
     grouped: dict[str, list[InputRecord]] = defaultdict(list)
     switch_order: list[str] = []
@@ -1737,8 +1993,10 @@ def run_normal(args: argparse.Namespace, records: list[InputRecord], password: s
             switch_order.append(record.switch)
         grouped[record.switch].append(record)
 
-    console.print(Panel.fit("[bold]AP DECOMMISSION VALIDATOR[/bold]", border_style="white"))
+    print_main_banner()
     results_by_switch: dict[str, list[PortResult]] = {}
+    connection_failures: list[DeviceConnectionError] = []
+
     with ThreadPoolExecutor(max_workers=min(args.workers, len(grouped))) as executor:
         future_map = {
             executor.submit(
@@ -1753,10 +2011,22 @@ def run_normal(args: argparse.Namespace, records: list[InputRecord], password: s
             ): switch
             for switch in switch_order
         }
+
         for future in as_completed(future_map):
             switch = future_map[future]
             try:
                 results_by_switch[switch] = future.result()
+            except DeviceConnectionError as exc:
+                # Do not convert connection failures into ordinary port results.
+                # They are run-level blockers because partial config/status files
+                # could be mistaken for a complete change package.
+                connection_failures.append(exc)
+                logger.error(
+                    "Run-blocking connection failure | Switch=%s | Category=%s | Detail=%s",
+                    exc.switch,
+                    exc.category,
+                    exc.detail,
+                )
             except Exception as exc:
                 logger.exception("Unhandled worker failure for %s", switch)
                 results_by_switch[switch] = [
@@ -1771,6 +2041,45 @@ def run_normal(args: argparse.Namespace, records: list[InputRecord], password: s
                     for r in grouped[switch]
                 ]
 
+    if connection_failures:
+        console.print()
+        console.print(
+            Panel(
+                Align.center(
+                    Text(
+                        "CONNECTION VALIDATION FAILED\nOUTPUT FILE GENERATION ABORTED",
+                        style="bold red",
+                    )
+                ),
+                border_style="red",
+                padding=(1, 2),
+            )
+        )
+
+        error_table = Table(header_style="bold red")
+        error_table.add_column("Switch", style="bold")
+        error_table.add_column("Failure")
+        error_table.add_column("Recommended Action")
+        for exc in sorted(connection_failures, key=lambda item: item.switch.lower()):
+            if exc.category == "AUTHENTICATION FAILED":
+                action = "Verify SSH username/password and AAA authorization."
+            elif exc.category == "CONNECTION TIMEOUT":
+                action = "Verify DNS/IP, reachability, TCP/22, SSH service, and timeout."
+            else:
+                action = "Verify hostname/IP, reachability, SSH service, and network path."
+            error_table.add_row(exc.switch, exc.category, action)
+        console.print(error_table)
+        console.print()
+        console.print(
+            f"[bold red]No {args.output_config} or {args.output_status} file was generated or modified.[/bold red]"
+        )
+        console.print(f"Detailed diagnostics: [bold]{args.log_file}[/bold]")
+        logger.error(
+            "Normal run aborted because %d switch connection(s) failed. Config/status outputs were not written.",
+            len(connection_failures),
+        )
+        return 3
+
     all_results: list[PortResult] = []
     for switch in switch_order:
         switch_results = results_by_switch.get(switch, [])
@@ -1780,12 +2089,13 @@ def run_normal(args: argparse.Namespace, records: list[InputRecord], password: s
         console.print()
         all_results.extend(switch_results)
 
+    # Transactional output boundary: files are written only after connection
+    # validation has succeeded for the complete requested switch inventory.
     write_config_file(Path(args.output_config), all_results, switch_order)
     write_status_csv(Path(args.output_status), all_results)
     print_summary(all_results, args)
     logger.info("Completed: %d ports", len(all_results))
     return 0
-
 
 
 
