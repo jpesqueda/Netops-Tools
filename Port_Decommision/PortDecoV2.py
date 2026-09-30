@@ -46,20 +46,6 @@ Commands such as "config t", "default interface", "shutdown", and "end" may
 appear only inside locally generated configuration files. They are never sent
 to a switch by this program.
 
-Maintenance Guidelines
-----------------------
-- Keep VLAN reconciliation logic centralized in determine_final_vlan() and
-  reconcile_vlan_information(). Do not duplicate VLAN decision logic elsewhere.
-- Keep configuration-safety decisions centralized in should_comment_configuration().
-- Any new device command MUST remain read-only and MUST be executed through
-  send_read_only_command().
-- Preserve the exact Port_Status.csv headers unless the external interface is
-  intentionally versioned.
-- If snapshot JSON structure changes, increment the snapshot schema and maintain
-  backward-compatibility logic where practical.
-- HTML output is intentionally self-contained (HTML/CSS/JavaScript in one file)
-  so reports can be opened locally without a web server.
-
 Author: Peskicorp
 Python: 3.10+
 Version: 2.1.0
