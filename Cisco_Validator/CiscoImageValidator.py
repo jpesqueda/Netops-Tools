@@ -9,7 +9,7 @@ Cisco Image Validator
 
 Version
 -------
-1.0.0
+1.1.0
 
 Author
 ------
@@ -20,11 +20,7 @@ Purpose
 CiscoImageValidator is a read-only pre-upgrade validation utility for Cisco
 Catalyst 9000 switches running Cisco IOS-XE.
 
-The tool is intended to help network engineers verify that a target IOS-XE
-software image is already present and valid before an upgrade maintenance
-window begins.
-
-For every device, the script validates:
+The tool validates:
 
     1. SSH connectivity.
     2. Catalyst model.
@@ -34,10 +30,28 @@ For every device, the script validates:
     6. Available bootflash free space.
     7. Overall PASS / FAIL / ERROR state.
 
+Version 1.1.0 Output Behavior
+-----------------------------
+Generated files are stored inside an output directory.
+
+If -o/--output is omitted, the script creates a date-based folder:
+
+    01-OCT-2026/
+        Devices_Verified.csv
+        CiscoImageValidator.log
+
+If -o/--output is provided, its value is used as the folder name:
+
+    python CiscoImageValidator.py -ho hosts.txt -c image.yaml -u admin -o CHG12345
+
+Result:
+
+    CHG12345/
+        Devices_Verified.csv
+        CiscoImageValidator.log
+
 Architecture
 ------------
-The implementation intentionally remains simple:
-
     hosts.txt
         |
         v
@@ -53,20 +67,22 @@ The implementation intentionally remains simple:
         v
     Main thread
         |
-        +--> Terminal report
-        +--> Devices_Verified.csv
-        +--> CiscoImageValidator.log
+        +--> Output directory
+                |
+                +--> Devices_Verified.csv
+                +--> CiscoImageValidator.log
 
-Each worker validates exactly one device and returns a DeviceResult object.
+Each worker validates exactly one device.
 
-Workers never write directly to the CSV report. This design avoids race
-conditions and keeps output ordered according to hosts.txt.
+Workers never write directly to the CSV report. The main thread collects all
+DeviceResult objects and writes the final report in the original hosts.txt
+order.
 
 Safety
 ------
 This tool is strictly READ-ONLY.
 
-Approved device commands are limited to:
+Approved device commands:
 
     show version
     dir bootflash:
@@ -81,53 +97,52 @@ The script does NOT perform:
     reload
     write memory
     configure terminal
-    software activation
-    software commit
-    image cleanup
-
-If future contributors add functionality, the read-only command allow-list
-inside send_read_only_command() must be reviewed carefully.
+    request platform
+    install add
+    install activate
+    install commit
+    install remove
 
 Requirements
 ------------
 Python 3.10+
 
-Install dependencies with:
+Install dependencies:
 
     pip install netmiko pyyaml rich
 
-Runtime Files
--------------
-Input:
+Input Files
+-----------
     hosts.txt
     image.yaml
 
-Output:
-    Devices_Verified.csv
-    CiscoImageValidator.log
+Generated Files
+---------------
+    <OUTPUT_FOLDER>/Devices_Verified.csv
+    <OUTPUT_FOLDER>/CiscoImageValidator.log
 
-Example
--------
-    python CiscoImageValidator.py \
-        --hosts hosts.txt \
-        --config image.yaml \
-        --username admin
-
-Maintenance Notes
+Maintenance Rules
 -----------------
 - Keep device validation inside validate_device().
-- Keep thread orchestration inside run_parallel_validation().
+- Keep concurrency orchestration inside run_parallel_validation().
 - Keep CSV generation in the main thread.
-- Do not log credentials.
-- Do not hardcode IOS-XE image/version/MD5 values.
-- Update __version__ whenever behavior changes.
+- Never log credentials.
+- Never hardcode image/version/hash values in Python.
+- Preserve PASS / FAIL / ERROR semantics.
+- Review send_read_only_command() before adding any new device command.
+- Update __version__ for every released behavioral change.
 - Update CHANGELOG.md for every released version.
 
-License
--------
-Internal operational utility. Distribution and usage should follow the
-organization's internal software and security policies.
+Author
+------
+Peskicorp
 """
+
+# =============================================================================
+# SECTION 1 - IMPORTS
+# =============================================================================
+# Standard-library imports are intentionally kept separate from third-party
+# modules so dependencies are easy for maintainers to identify.
 
 from __future__ import annotations
 
@@ -139,7 +154,8 @@ import re
 import socket
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -162,11 +178,17 @@ from rich.progress import (
 from rich.table import Table
 
 
-__version__ = "1.0.0"
+# =============================================================================
+# SECTION 2 - APPLICATION METADATA AND CONSTANTS
+# =============================================================================
+# Release metadata is intentionally centralized so --help, logs, banners, and
+# documentation can refer to one authoritative version value.
+
+__version__ = "1.1.0"
 __author__ = "Peskicorp"
 
-DEFAULT_OUTPUT = "Devices_Verified.csv"
-DEFAULT_LOG = "CiscoImageValidator.log"
+DEFAULT_REPORT_NAME = "Devices_Verified.csv"
+DEFAULT_LOG_NAME = "CiscoImageValidator.log"
 DEFAULT_WORKERS = 20
 DEFAULT_TIMEOUT = 30
 MIN_MD5_TIMEOUT = 600
@@ -199,6 +221,12 @@ CSV_FIELDS = [
     "Reason",
 ]
 
+
+# =============================================================================
+# SECTION 3 - DATA MODELS
+# =============================================================================
+# These dataclasses define the structured contract between configuration,
+# worker threads, and final reporting.
 
 @dataclass(frozen=True)
 class ImageConfig:
@@ -269,6 +297,12 @@ class DeviceResult:
         }
 
 
+# =============================================================================
+# SECTION 4 - COMMAND-LINE INTERFACE
+# =============================================================================
+# CLI parsing stays isolated here so command options can be changed without
+# touching device validation logic.
+
 def parse_arguments() -> argparse.Namespace:
     """Build and parse command-line arguments."""
     description = (
@@ -283,11 +317,14 @@ Examples:
   python CiscoImageValidator.py -ho hosts.txt -c image.yaml -u admin -p PASSWORD
   python CiscoImageValidator.py -ho hosts.txt -c image.yaml -u admin --workers 10
   python CiscoImageValidator.py -ho hosts.txt -c image.yaml -u admin --workers 30
-  python CiscoImageValidator.py -ho hosts.txt -c image.yaml -u admin -o Audit_Report.csv
+  python CiscoImageValidator.py -ho hosts.txt -c image.yaml -u admin -o CHG12345
   python CiscoImageValidator.py -ho hosts.txt -c image.yaml -u admin --timeout 45 --verbose
 
 Notes:
   * Default workers: 20
+  * If -o/--output is omitted, a DD-MMM-YYYY folder is created.
+  * -o/--output defines the output folder name.
+  * Generated filenames remain Devices_Verified.csv and CiscoImageValidator.log.
   * --timeout is the base SSH/show-command timeout in seconds.
   * MD5 verification gets an extended timeout of at least 600 seconds.
   * If --password is omitted, the password is requested securely with getpass.
@@ -324,8 +361,11 @@ Notes:
     parser.add_argument(
         "-o",
         "--output",
-        default=DEFAULT_OUTPUT,
-        help=f"CSV report path (default: {DEFAULT_OUTPUT}).",
+        metavar="FOLDER",
+        help=(
+            "Output folder name. If omitted, the current date is used in "
+            "DD-MMM-YYYY format, for example 01-OCT-2026."
+        ),
     )
     parser.add_argument(
         "--workers",
@@ -368,8 +408,46 @@ def textwrap_dedent(value: str) -> str:
     return "\n".join(line[indentation:] for line in lines)
 
 
-def setup_logging(verbose: bool, log_path: str = DEFAULT_LOG) -> logging.Logger:
-    """Configure file logging. Python logging is thread-safe."""
+# =============================================================================
+# SECTION 5 - OUTPUT DIRECTORY AND LOGGING
+# =============================================================================
+# Version 1.1.0 introduces folder-based output. Both generated files are
+# written into the same execution directory for easier change documentation.
+
+def build_output_directory(output_name: str | None) -> Path:
+    """
+    Create and return the directory used for generated files.
+
+    If output_name is None, the folder uses the local execution date in
+    DD-MMM-YYYY format. Example: 01-OCT-2026.
+
+    If output_name is provided, it is treated as a directory name or path.
+
+    Examples:
+        -o CHG12345
+        -o Core_Upgrade
+        -o reports/CHG12345
+
+    The directory is created relative to the current working directory unless
+    an absolute path is supplied.
+    """
+    if output_name:
+        output_directory = Path(output_name).expanduser()
+    else:
+        output_directory = Path(
+            datetime.now().strftime("%d-%b-%Y").upper()
+        )
+
+    output_directory.mkdir(parents=True, exist_ok=True)
+    return output_directory
+
+
+def setup_logging(verbose: bool, log_path: Path) -> logging.Logger:
+    """
+    Configure thread-safe file logging.
+
+    The log file lives inside the selected output directory.
+    """
     logger = logging.getLogger("CiscoImageValidator")
     logger.setLevel(logging.DEBUG if verbose else logging.INFO)
     logger.handlers.clear()
@@ -386,6 +464,11 @@ def setup_logging(verbose: bool, log_path: str = DEFAULT_LOG) -> logging.Logger:
     logger.addHandler(handler)
     return logger
 
+
+# =============================================================================
+# SECTION 6 - INPUT FILE LOADING AND VALIDATION
+# =============================================================================
+# Inventory and YAML parsing are kept separate from SSH operations.
 
 def load_hosts(path: str) -> list[str]:
     """
@@ -478,6 +561,12 @@ def load_config(path: str) -> ImageConfig:
     )
 
 
+# =============================================================================
+# SECTION 7 - SSH CONNECTION AND COMMAND SAFETY
+# =============================================================================
+# Each worker owns its own Netmiko connection. Device commands are restricted
+# by send_read_only_command() to preserve the read-only design.
+
 def connect_device(
     host: str,
     credentials: Credentials,
@@ -517,6 +606,12 @@ def send_read_only_command(connection: Any, command: str, timeout: int) -> str:
 
     return str(connection.send_command(command, read_timeout=timeout))
 
+
+# =============================================================================
+# SECTION 8 - IOS-XE OUTPUT PARSING
+# =============================================================================
+# Parsing functions convert raw IOS-XE command output into normalized values.
+# Keep these functions small so they can be unit-tested with saved CLI output.
 
 def parse_model(show_version: str) -> str:
     """
@@ -649,6 +744,11 @@ def calculate_md5(
     return parse_calculated_md5(output)
 
 
+# =============================================================================
+# SECTION 9 - VALIDATION HELPERS
+# =============================================================================
+# These functions contain deterministic validation logic without SSH access.
+
 def validate_md5(expected_md5: str, calculated_md5: str) -> str:
     """Compare normalized expected and calculated MD5 values."""
     expected = expected_md5.strip().lower()
@@ -686,6 +786,12 @@ def build_error_result(
         reason=reason,
     )
 
+
+# =============================================================================
+# SECTION 10 - SINGLE-DEVICE WORKER
+# =============================================================================
+# validate_device() is the worker boundary. It validates exactly one switch,
+# isolates failures, closes its connection, and returns one DeviceResult.
 
 def validate_device(
     inventory_index: int,
@@ -955,6 +1061,12 @@ def validate_device(
                 )
 
 
+# =============================================================================
+# SECTION 11 - PARALLEL EXECUTION
+# =============================================================================
+# ThreadPoolExecutor handles concurrent devices. Workers never write shared
+# report files; results are collected and reordered by inventory position.
+
 def run_parallel_validation(
     hosts: list[str],
     image_config: ImageConfig,
@@ -1027,6 +1139,12 @@ def run_parallel_validation(
     return [results_by_index[index] for index in range(len(hosts))]
 
 
+# =============================================================================
+# SECTION 12 - REPORT GENERATION AND TERMINAL PRESENTATION
+# =============================================================================
+# CSV output is written only after workers finish. Terminal output is also
+# rendered centrally to avoid interleaved thread output.
+
 def write_csv(results: Iterable[DeviceResult], output_path: str) -> None:
     """
     Write the final CSV report.
@@ -1089,7 +1207,7 @@ def print_banner(console: Console) -> None:
     """Print a centered application banner."""
     width = 108
     console.print("=" * width)
-    console.print("CISCO IMAGE VALIDATOR".center(width))
+    console.print(f"CISCO IMAGE VALIDATOR v{__version__}".center(width))
     console.print("=" * width)
 
 
@@ -1143,7 +1261,9 @@ def print_summary(
     results: list[DeviceResult],
     image_config: ImageConfig,
     workers: int,
-    output_path: str,
+    output_directory: Path,
+    report_path: Path,
+    log_path: Path,
     console: Console,
 ) -> None:
     """Print the required dynamic summary."""
@@ -1171,11 +1291,17 @@ def print_summary(
     console.print(f"Failed               : {failed}")
     console.print(f"Errors               : {errors}")
     console.print()
-    console.print(f"Report               : {output_path}")
-    console.print(f"Log                  : {DEFAULT_LOG}")
+    console.print(f"Output Folder        : {output_directory}")
+    console.print(f"Report               : {report_path}")
+    console.print(f"Log                  : {log_path}")
     console.print()
     console.print("=" * width)
 
+
+# =============================================================================
+# SECTION 13 - PROCESS EXIT STATUS
+# =============================================================================
+# Exit codes make the utility suitable for future pipeline/orchestration use.
 
 def determine_exit_code(results: list[DeviceResult]) -> int:
     """
@@ -1192,13 +1318,36 @@ def determine_exit_code(results: list[DeviceResult]) -> int:
     return 0
 
 
+# =============================================================================
+# SECTION 14 - APPLICATION ENTRY POINT
+# =============================================================================
+# main() coordinates CLI parsing, output setup, input loading, parallel
+# validation, reporting, and the final process exit code.
+
 def main() -> None:
     """Application entry point."""
     args = parse_arguments()
     console = Console()
-    logger = setup_logging(args.verbose)
 
-    logger.info("CiscoImageValidator v%s startup - Author: %s", __version__, __author__)
+    try:
+        output_directory = build_output_directory(args.output)
+    except OSError as exc:
+        console.print(
+            f"[bold red]ERROR:[/bold red] Could not create output directory: "
+            f"{compact_exception(exc)}"
+        )
+        raise SystemExit(2) from exc
+
+    report_path = output_directory / DEFAULT_REPORT_NAME
+    log_path = output_directory / DEFAULT_LOG_NAME
+    logger = setup_logging(args.verbose, log_path)
+
+    logger.info(
+        "CiscoImageValidator v%s startup - Author: %s",
+        __version__,
+        __author__,
+    )
+    logger.info("Output directory=%s", output_directory)
 
     try:
         hosts = load_hosts(args.hosts)
@@ -1233,7 +1382,7 @@ def main() -> None:
     )
 
     try:
-        write_csv(results, args.output)
+        write_csv(results, str(report_path))
     except OSError as exc:
         logger.error("Failed to write CSV: %s", compact_exception(exc))
         console.print(
@@ -1247,13 +1396,19 @@ def main() -> None:
         results,
         image_config,
         args.workers,
-        args.output,
+        output_directory,
+        report_path,
+        log_path,
         console,
     )
 
     logger.info("CiscoImageValidator completion")
     raise SystemExit(determine_exit_code(results))
 
+
+# =============================================================================
+# SECTION 15 - SCRIPT EXECUTION GUARD
+# =============================================================================
 
 if __name__ == "__main__":
     main()
