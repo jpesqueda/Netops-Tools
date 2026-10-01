@@ -103,8 +103,12 @@ Input:
     image.yaml
 
 Output:
-    Devices_Verified.csv
-    CiscoImageValidator.log
+    <OUTPUT_FOLDER>/Devices_Verified.csv
+    <OUTPUT_FOLDER>/CiscoImageValidator.log
+
+Default output folder:
+    DD-MMM-YYYY
+    Example: 01-OCT-2026
 
 Example
 -------
@@ -112,6 +116,13 @@ Example
         --hosts hosts.txt \
         --config image.yaml \
         --username admin
+
+Custom output folder:
+    python CiscoImageValidator.py \
+        --hosts hosts.txt \
+        --config image.yaml \
+        --username admin \
+        --output Change123_Audit
 
 Maintenance Notes
 -----------------
@@ -140,6 +151,7 @@ import socket
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -162,11 +174,11 @@ from rich.progress import (
 from rich.table import Table
 
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 __author__ = "Peskicorp"
 
-DEFAULT_OUTPUT = "Devices_Verified.csv"
-DEFAULT_LOG = "CiscoImageValidator.log"
+DEFAULT_REPORT_NAME = "Devices_Verified.csv"
+DEFAULT_LOG_NAME = "CiscoImageValidator.log"
 DEFAULT_WORKERS = 20
 DEFAULT_TIMEOUT = 30
 MIN_MD5_TIMEOUT = 600
@@ -283,11 +295,13 @@ Examples:
   python CiscoImageValidator.py -ho hosts.txt -c image.yaml -u admin -p PASSWORD
   python CiscoImageValidator.py -ho hosts.txt -c image.yaml -u admin --workers 10
   python CiscoImageValidator.py -ho hosts.txt -c image.yaml -u admin --workers 30
-  python CiscoImageValidator.py -ho hosts.txt -c image.yaml -u admin -o Audit_Report.csv
+  python CiscoImageValidator.py -ho hosts.txt -c image.yaml -u admin -o Change123_Audit
   python CiscoImageValidator.py -ho hosts.txt -c image.yaml -u admin --timeout 45 --verbose
 
 Notes:
   * Default workers: 20
+  * Default output folder: current date in DD-MMM-YYYY format.
+  * -o/--output sets the output folder name, not the CSV filename.
   * --timeout is the base SSH/show-command timeout in seconds.
   * MD5 verification gets an extended timeout of at least 600 seconds.
   * If --password is omitted, the password is requested securely with getpass.
@@ -324,8 +338,10 @@ Notes:
     parser.add_argument(
         "-o",
         "--output",
-        default=DEFAULT_OUTPUT,
-        help=f"CSV report path (default: {DEFAULT_OUTPUT}).",
+        help=(
+            "Output folder name. If omitted, a date-based folder is created "
+            "using DD-MMM-YYYY format, for example 01-OCT-2026."
+        ),
     )
     parser.add_argument(
         "--workers",
@@ -368,7 +384,35 @@ def textwrap_dedent(value: str) -> str:
     return "\n".join(line[indentation:] for line in lines)
 
 
-def setup_logging(verbose: bool, log_path: str = DEFAULT_LOG) -> logging.Logger:
+def build_output_directory(output_name: str | None) -> Path:
+    """
+    Create and return the directory used for generated files.
+
+    Behavior:
+        - If --output/-o is provided, that value is used as the folder name.
+        - Otherwise, the current date is used in DD-MMM-YYYY format.
+
+    Examples:
+        01-OCT-2026/
+        Change123_Audit/
+        Core_Switch_Upgrade/
+
+    The directory is created relative to the location from which the script
+    is executed unless the user supplies an absolute or nested path.
+    """
+    if output_name:
+        folder = Path(output_name).expanduser()
+    else:
+        folder = Path(datetime.now().strftime("%d-%b-%Y").upper())
+
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
+
+
+def setup_logging(
+    verbose: bool,
+    log_path: Path,
+) -> logging.Logger:
     """Configure file logging. Python logging is thread-safe."""
     logger = logging.getLogger("CiscoImageValidator")
     logger.setLevel(logging.DEBUG if verbose else logging.INFO)
@@ -1143,7 +1187,9 @@ def print_summary(
     results: list[DeviceResult],
     image_config: ImageConfig,
     workers: int,
-    output_path: str,
+    output_directory: Path,
+    report_path: Path,
+    log_path: Path,
     console: Console,
 ) -> None:
     """Print the required dynamic summary."""
@@ -1171,8 +1217,9 @@ def print_summary(
     console.print(f"Failed               : {failed}")
     console.print(f"Errors               : {errors}")
     console.print()
-    console.print(f"Report               : {output_path}")
-    console.print(f"Log                  : {DEFAULT_LOG}")
+    console.print(f"Output Folder        : {output_directory}")
+    console.print(f"Report               : {report_path}")
+    console.print(f"Log                  : {log_path}")
     console.print()
     console.print("=" * width)
 
@@ -1196,9 +1243,26 @@ def main() -> None:
     """Application entry point."""
     args = parse_arguments()
     console = Console()
-    logger = setup_logging(args.verbose)
 
-    logger.info("CiscoImageValidator v%s startup - Author: %s", __version__, __author__)
+    try:
+        output_directory = build_output_directory(args.output)
+    except OSError as exc:
+        console.print(
+            f"[bold red]ERROR:[/bold red] Could not create output directory: "
+            f"{compact_exception(exc)}"
+        )
+        raise SystemExit(2) from exc
+
+    report_path = output_directory / DEFAULT_REPORT_NAME
+    log_path = output_directory / DEFAULT_LOG_NAME
+    logger = setup_logging(args.verbose, log_path)
+
+    logger.info(
+        "CiscoImageValidator v%s startup - Author: %s",
+        __version__,
+        __author__,
+    )
+    logger.info("Output directory=%s", output_directory)
 
     try:
         hosts = load_hosts(args.hosts)
@@ -1233,7 +1297,7 @@ def main() -> None:
     )
 
     try:
-        write_csv(results, args.output)
+        write_csv(results, str(report_path))
     except OSError as exc:
         logger.error("Failed to write CSV: %s", compact_exception(exc))
         console.print(
@@ -1247,7 +1311,9 @@ def main() -> None:
         results,
         image_config,
         args.workers,
-        args.output,
+        output_directory,
+        report_path,
+        log_path,
         console,
     )
 
