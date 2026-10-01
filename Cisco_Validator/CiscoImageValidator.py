@@ -9,7 +9,7 @@ Cisco Image Validator
 
 Version
 -------
-1.1.0
+1.1.1
 
 Author
 ------
@@ -184,7 +184,7 @@ from rich.table import Table
 # Release metadata is intentionally centralized so --help, logs, banners, and
 # documentation can refer to one authoritative version value.
 
-__version__ = "1.1.0"
+__version__ = "1.1.1"
 __author__ = "Peskicorp"
 
 DEFAULT_REPORT_NAME = "Devices_Verified.csv"
@@ -1188,19 +1188,33 @@ def unicode_supported() -> bool:
 
 
 def terminal_check(value: str, unicode_ok: bool) -> str:
-    """Format PASS/FAIL/ERROR checks for the terminal table."""
-    if not unicode_ok:
-        return value
+    """
+    Format and color validation states for the Rich terminal table.
+
+    Color policy:
+        PASS      -> green
+        FAIL      -> red
+        ERROR     -> red
+        NOT FOUND -> red
+
+    Unknown or neutral values such as '-' remain uncolored.
+    """
+    symbols = {
+        "PASS": "✓ PASS" if unicode_ok else "PASS",
+        "FAIL": "✗ FAIL" if unicode_ok else "FAIL",
+        "ERROR": "! ERROR" if unicode_ok else "ERROR",
+        "NOT FOUND": "✗ NOT FOUND" if unicode_ok else "NOT FOUND",
+    }
+
+    rendered = symbols.get(value, value)
 
     if value == "PASS":
-        return "✓ PASS"
-    if value == "FAIL":
-        return "✗ FAIL"
-    if value == "ERROR":
-        return "! ERROR"
-    if value == "NOT FOUND":
-        return "✗ NOT FOUND"
-    return value
+        return f"[bold green]{rendered}[/bold green]"
+
+    if value in {"FAIL", "ERROR", "NOT FOUND"}:
+        return f"[bold red]{rendered}[/bold red]"
+
+    return rendered
 
 
 def print_banner(console: Console) -> None:
@@ -1260,17 +1274,12 @@ def print_results(
 def print_summary(
     results: list[DeviceResult],
     image_config: ImageConfig,
-    workers: int,
     output_directory: Path,
     report_path: Path,
     log_path: Path,
     console: Console,
 ) -> None:
-    """Print the required dynamic summary."""
-    passed = sum(result.status == "PASS" for result in results)
-    failed = sum(result.status == "FAIL" for result in results)
-    errors = sum(result.status == "ERROR" for result in results)
-
+    """Print the concise execution summary without device-count statistics."""
     width = 88
     console.print("\n" + "=" * width)
     console.print("SUMMARY")
@@ -1284,12 +1293,6 @@ def print_summary(
         "Required Free Space  : "
         f"{human_bytes(image_config.required_space)} (Image Size x 2)"
     )
-    console.print()
-    console.print(f"Workers              : {workers}")
-    console.print(f"Devices Checked      : {len(results)}")
-    console.print(f"Passed               : {passed}")
-    console.print(f"Failed               : {failed}")
-    console.print(f"Errors               : {errors}")
     console.print()
     console.print(f"Output Folder        : {output_directory}")
     console.print(f"Report               : {report_path}")
@@ -1395,7 +1398,6 @@ def main() -> None:
     print_summary(
         results,
         image_config,
-        args.workers,
         output_directory,
         report_path,
         log_path,
