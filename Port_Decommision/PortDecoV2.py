@@ -21,6 +21,8 @@ Primary Workflows
    - Generate active configuration only for ports considered safe.
    - Comment unsafe configuration blocks for manual review.
    - Write Decommission_Config.txt, Port_Status.csv, and Port_decommission.log.
+   - With --config-per-device, also write one implementation file per switch
+     using the format Config_<Switch>.txt.
 
 2. PRE-CHECKS
    - Capture raw evidence for each requested switch/port.
@@ -62,7 +64,7 @@ Maintenance Guidelines
 
 Author: Peskicorp
 Python: 3.10+
-Version: 2.1.0
+Version: 2.3.0
 
 Runtime Requirements
 --------------------
@@ -118,7 +120,7 @@ from rich.text import Text
 # ==============================================================================
 TOOL_NAME = "Portdeco - PORT Decommission Validator"
 AUTHOR = "Peskicorp"
-VERSION = "2.2.0"
+VERSION = "2.3.0"
 DEFAULT_ACCESS_VLAN = "1"
 
 PORT_CONNECTED = "CONNECTED"
@@ -272,6 +274,9 @@ def parse_args() -> argparse.Namespace:
   # Normal validation + config generation
   python Portdeco.py -ho hosts.csv -u admin -t port_template.txt
 
+  # Normal validation + consolidated and per-device configuration files
+  python Portdeco.py -ho hosts.csv -u admin -t port_template.txt --config-per-device
+
   # Interactive PRE/POST checks
   python Portdeco.py -ho hosts.csv -u admin --checks
 
@@ -294,6 +299,11 @@ Safety:
     parser.add_argument("-t", "--template", help="Dynamic port template file (required outside --checks)")
 
     parser.add_argument("--output-config", default="Decommission_Config.txt")
+    parser.add_argument(
+        "--config-per-device",
+        action="store_true",
+        help="Also generate one configuration file per switch: Config_<Switch>.txt",
+    )
     parser.add_argument("--output-status", default="Port_Status.csv")
     parser.add_argument("--log-file", default="Port_decommission.log")
     parser.add_argument(
@@ -1304,6 +1314,55 @@ def write_config_file(path: Path, results: Iterable[PortResult], switch_order: l
     path.write_text(content, encoding="utf-8")
 
 
+def write_device_config_files(
+    results: Iterable[PortResult],
+    switch_order: list[str],
+    output_dir: Path | None = None,
+) -> list[Path]:
+    """Write one manual implementation configuration file per switch.
+
+    Files use the format ``Config_<Switch>.txt`` and contain exactly the same
+    safety-controlled configuration blocks as the consolidated output. Unsafe
+    blocks therefore remain fully commented. The function returns the paths
+    that were actually generated so the console summary can report them.
+
+    The default output directory is the current working directory.
+    """
+    target_dir = output_dir or Path(".")
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    by_switch: dict[str, list[PortResult]] = defaultdict(list)
+    for result in results:
+        if result.config_block.strip():
+            by_switch[result.switch].append(result)
+
+    generated: list[Path] = []
+    for switch in switch_order:
+        switch_results = by_switch.get(switch, [])
+        if not switch_results:
+            continue
+
+        safe_switch_name = sanitize_filename(switch)
+        path = target_dir / f"Config_{safe_switch_name}.txt"
+
+        lines = [
+            "!!====================================================================",
+            f"!!Switch: {switch}",
+            "!!====================================================================",
+            "config t",
+            "!",
+        ]
+        for result in switch_results:
+            lines.append(result.config_block.rstrip())
+            lines.append("!")
+        lines.append("end")
+
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        generated.append(path)
+
+    return generated
+
+
 def write_status_csv(path: Path, results: Iterable[PortResult]) -> None:
     """Write Port_Status.csv including endpoint MAC validation results."""
     with path.open("w", encoding="utf-8", newline="") as handle:
@@ -1378,7 +1437,11 @@ def make_switch_table(switch: str, results: list[PortResult]) -> Table:
     return table
 
 
-def print_summary(results: list[PortResult], args: argparse.Namespace) -> None:
+def print_summary(
+    results: list[PortResult],
+    args: argparse.Namespace,
+    device_config_files: list[Path] | None = None,
+) -> None:
     """Print the simplified final port-status summary and generated file names."""
     statuses = Counter(r.port_status for r in results)
     console.print("=" * 68)
@@ -1395,6 +1458,9 @@ def print_summary(results: list[PortResult], args: argparse.Namespace) -> None:
     console.print()
     console.print("Files Generated:")
     console.print(f"    {args.output_config}")
+    if device_config_files:
+        for config_path in device_config_files:
+            console.print(f"    {config_path}")
     console.print(f"    {args.output_status}")
     console.print(f"    {args.log_file}")
     console.print("=" * 68)
@@ -2202,8 +2268,13 @@ def run_normal(args: argparse.Namespace, records: list[InputRecord], password: s
     # Transactional output boundary: files are written only after connection
     # validation has succeeded for the complete requested switch inventory.
     write_config_file(Path(args.output_config), all_results, switch_order)
+
+    device_config_files: list[Path] = []
+    if args.config_per_device:
+        device_config_files = write_device_config_files(all_results, switch_order)
+
     write_status_csv(Path(args.output_status), all_results)
-    print_summary(all_results, args)
+    print_summary(all_results, args, device_config_files)
     logger.info("Completed: %d ports", len(all_results))
     return 0
 
