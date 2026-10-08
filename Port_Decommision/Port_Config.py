@@ -706,6 +706,28 @@ def normalize_interface_name(name: str) -> str:
     return f"{canonical_type}{interface_id}"
 
 
+def interface_token_matches(candidate: str, target_port: str) -> bool:
+    """Return True when a CLI token identifies the requested interface.
+
+    Cisco ``show interfaces status`` output normally uses abbreviated names such
+    as ``Gi1/0/1`` while inventory input may use ``GigabitEthernet1/0/1``.
+    Both values are normalized through :func:`normalize_interface_name` before
+    comparison. Header tokens such as ``Port`` and any malformed/non-interface
+    text are intentionally ignored by returning ``False`` instead of raising
+    ``ValueError``.
+
+    This helper is shared by ``parse_interface_status()`` and
+    ``extract_status_line()`` so CLI header handling remains consistent.
+    """
+    try:
+        normalized_candidate = normalize_interface_name(candidate)
+        normalized_target = normalize_interface_name(target_port)
+    except (TypeError, ValueError):
+        return False
+
+    return normalized_candidate.casefold() == normalized_target.casefold()
+
+
 def interface_short_name(name: str) -> str:
     """Return a Cisco-style short interface name used when matching show-command output."""
     replacements = [
