@@ -118,16 +118,16 @@ except ImportError:  # Allows --help/--version without installed runtime depende
         """Fallback placeholder used only when Netmiko is unavailable."""
 
 try:
-    from jinja2 import Environment, StrictUndefined, TemplateError, TemplateSyntaxError
+    from jinja2 import Environment, StrictUndefined
+    from jinja2.exceptions import (
+        TemplateError as JinjaTemplateError,
+        TemplateSyntaxError as JinjaTemplateSyntaxError,
+    )
 except ImportError:  # Allows --help/--version and non-generation modes without Jinja2.
     Environment = None
     StrictUndefined = None
-
-    class TemplateError(Exception):
-        """Fallback placeholder used only when Jinja2 is unavailable."""
-
-    class TemplateSyntaxError(TemplateError):
-        """Fallback placeholder used only when Jinja2 is unavailable."""
+    JinjaTemplateError = Exception
+    JinjaTemplateSyntaxError = Exception
 
 from rich.align import Align
 from rich.console import Console
@@ -903,7 +903,7 @@ def load_and_validate_template(path: Path) -> str:
     env = _jinja_environment()
     try:
         env.parse(text)
-    except TemplateSyntaxError as exc:
+    except JinjaTemplateSyntaxError as exc:
         raise ValueError(
             f"Jinja2 template syntax error in {path} at line {getattr(exc, 'lineno', '?')}: {exc}"
         ) from exc
@@ -1170,7 +1170,7 @@ def render_template(template: str, result: PortResult) -> str:
     env = _jinja_environment()
     try:
         rendered = env.from_string(template).render(**template_context(result))
-    except TemplateError as exc:
+    except JinjaTemplateError as exc:
         raise ValueError(
             f"Jinja2 rendering failed for {result.switch} {result.port}: {exc}"
         ) from exc
