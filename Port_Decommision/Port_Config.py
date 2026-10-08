@@ -142,7 +142,7 @@ from rich.text import Text
 # ==============================================================================
 TOOL_NAME = "Port_Config - PORT Validator"
 AUTHOR = "Peskicorp"
-VERSION = "5.1.0"
+VERSION = "5.3.0"
 DEFAULT_ACCESS_VLAN = "1"
 
 PORT_CONNECTED = "CONNECTED"
@@ -301,6 +301,75 @@ class ExecutionDevicePlan:
 # ==============================================================================
 # SECTION 04 - COMMAND-LINE INTERFACE AND LOGGING
 # ==============================================================================
+def interactive_operation_menu() -> dict[str, object]:
+    """Display the operator menu used when Port_Config is launched with no CLI args.
+
+    The menu is only a front-end for the same argparse-backed workflows used by
+    normal command-line execution. It returns option overrides that parse_args()
+    applies before the existing validation logic runs.
+    """
+    print()
+    print("===================================================================")
+    print("                           PORT CONFIG")
+    print("===================================================================")
+    print()
+    print("Select Operation:")
+    print()
+    print("  [1] Generate Configuration")
+    print("  [2] Generate Configuration + AIO Multifile")
+    print("  [3] PRE Checks")
+    print("  [4] PRE Checks + Backup")
+    print("  [5] POST Checks")
+    print("  [6] POST Checks + Backup")
+    print("  [7] POST Checks + Backup + HTML Compare")
+    print("  [8] Execute Configuration File")
+    print("  [9] Exit")
+    print()
+
+    valid_choices = {str(i) for i in range(1, 10)}
+    while True:
+        choice = input("Selection [1-9]: " ).strip()
+        if choice in valid_choices:
+            break
+        print("Invalid selection. Enter a number from 1 to 9.")
+
+    if choice == "9":
+        raise SystemExit(0)
+
+    overrides: dict[str, object] = {}
+    if choice == "2":
+        overrides["aio"] = True
+    elif choice == "3":
+        overrides["prechecks"] = True
+    elif choice == "4":
+        overrides["prechecks"] = True
+        overrides["backup"] = True
+    elif choice == "5":
+        overrides["postchecks"] = True
+    elif choice == "6":
+        overrides["postchecks"] = True
+        overrides["backup"] = True
+    elif choice == "7":
+        overrides["postchecks"] = True
+        overrides["backup"] = True
+        overrides["compare"] = True
+    elif choice == "8":
+        while True:
+            config_file = input("Configuration file: " ).strip()
+            if config_file:
+                overrides["execute"] = config_file
+                break
+            print("Configuration file cannot be empty.")
+
+    # Generation/check modes use an inventory file by default. Execution gets
+    # the device list from Device_Name delimiters in the supplied config file.
+    if choice != "8":
+        host_file = input("Host file [hosts.csv]: " ).strip() or "hosts.csv"
+        overrides["host_file"] = host_file
+
+    return overrides
+
+
 def parse_args() -> argparse.Namespace:
     """Build and validate the Port_Config command-line interface.
 
@@ -316,76 +385,87 @@ def parse_args() -> argparse.Namespace:
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=r"""
-EXECUTION EXAMPLES
-==================
+QUICK START
+===========
 
-Example 1 - Run PRE checks only
-  Collect the current state of every requested port before the change.
+Generate per-device configuration files:
+  python Port_Config.py -hf hosts.csv -u admin
 
+Interactive operator menu (recommended for manual use):
+  python Port_Config.py
+
+  Opens a guided menu for generation, PRE/POST checks, backups, comparison,
+  and config execution. Missing username/password values are prompted securely.
+
+Generate per-device files plus one AIO multifile:
+  python Port_Config.py -hf hosts.csv -u admin -AIO
+
+COMMON WORKFLOWS
+================
+
+Example 1 - PRE checks
+  Collect the current state of all requested ports.
   python Port_Config.py -hf hosts.csv -u admin --prechecks
 
-Example 2 - Run PRE checks and save full running-config backups
-  Recommended before a maintenance/change window.
-
+Example 2 - PRE checks + full running-config backup
+  Recommended immediately before a change window.
   python Port_Config.py -hf hosts.csv -u admin --prechecks --backup
 
-Example 3 - Run POST checks only
+Example 3 - POST checks
   Collect the state of the same ports after implementation.
-
   python Port_Config.py -hf hosts.csv -u admin --postchecks
 
-Example 4 - Run POST checks, save backups, and generate the HTML diff
-  Compares the latest matching PRE snapshot against the POST snapshot.
-  If PRE and POST backups exist, the HTML also includes changed lines from the
-  full running-config backups.
-
+Example 4 - POST checks + backup + HTML comparison
+  Compares the latest matching PRE snapshot with POST and shows only changed lines.
   python Port_Config.py -hf hosts.csv -u admin --postchecks --backup --compare
 
 Example 5 - Interactive PRE/POST selection
-  The script asks whether the run is PRE or POST.
-
   python Port_Config.py -hf hosts.csv -u admin --checks
 
-Example 6 - Interactive PRE/POST selection with backup
-
+Example 6 - Interactive PRE/POST selection + backup
   python Port_Config.py -hf hosts.csv -u admin --checks --backup
 
-Example 7 - Generate one Config_<Device>.txt file per switch
-  Per-device configuration files are the default generation mode.
+Example 7 - One switch / one port
+  python Port_Config.py -ho Switch1 --Port Gi1/0/1 -u admin
 
-  python Port_Config.py -hf hosts.csv -u admin
-
-Example 8 - Generate per-device files plus one AIO multifile
-  If the inventory is hosts.csv, the AIO file is Multifile_hosts.txt.
-
-  python Port_Config.py -hf hosts.csv -u admin -AIO
-
-Example 9 - Generate configuration for one switch and multiple ports
-
+Example 8 - One switch / multiple ports
   python Port_Config.py -ho Switch1 --Port Gi1/0/1 Gi1/0/2 Gi1/0/3 -u admin
 
-Example 10 - Use an output directory
+Example 9 - Generate AIO multifile
+  If the inventory is hosts.csv, output is Multifile_hosts.txt.
+  python Port_Config.py -hf hosts.csv -u admin -AIO
 
+Example 10 - Write outputs to a change directory
   python Port_Config.py -hf hosts.csv -u admin -AIO -o Change_001
 
-Example 11 - Execute an AIO multifile
-  Device_Name:<switch> is used as the device delimiter.
-
-  python Port_Config.py --execute Multifile_hosts.txt -u admin
-
-Example 12 - Execute one device configuration file
-
+Example 11 - Execute one device configuration file
   python Port_Config.py --execute Config_Switch1.txt -u admin
 
-Example 13 - Execute without the interactive EXECUTE confirmation
-  Use only in controlled automation workflows.
+Example 12 - Execute an AIO multifile
+  Device_Name:<switch> is used as the device delimiter.
+  python Port_Config.py --execute Multifile_hosts.txt -u admin
 
+Example 13 - Execute without interactive EXECUTE confirmation
+  Use only in controlled automation workflows.
   python Port_Config.py --execute Multifile_hosts.txt -u admin --yes
 
-Example 14 - Supply the password on the command line
-  Omitting -p/--password is safer because the script will prompt with getpass.
-
+Example 14 - Password supplied on the command line
+  Omitting -p is safer because the script prompts securely with getpass.
   python Port_Config.py -hf hosts.csv -u admin -p PASSWORD --prechecks
+
+INTERACTIVE FALLBACKS
+=====================
+
+If -u/--user is omitted:
+  SSH Username: <enter username>
+
+When CLI arguments are supplied but no source is provided:
+  Host file [hosts.csv]: <press Enter to use hosts.csv, or type another CSV>
+
+When NO command-line arguments are supplied:
+  Port_Config opens the interactive operation menu first.
+
+The password already prompts securely when -p/--password is omitted.
 
 INPUT CSV
 =========
@@ -434,7 +514,7 @@ Unchanged lines are intentionally omitted.
 """,
     )
 
-    source = parser.add_mutually_exclusive_group(required=True)
+    source = parser.add_mutually_exclusive_group(required=False)
     source.add_argument(
         "-ho", "--host",
         help="Single switch hostname/IP. Use with --Port for one or more interfaces.",
@@ -458,7 +538,7 @@ Unchanged lines are intentionally omitted.
         metavar="INTERFACE",
         help="One or more ports for --host. May be supplied more than once.",
     )
-    parser.add_argument("-u", "--user", "--username", dest="user", required=True, help="SSH username")
+    parser.add_argument("-u", "--user", "--username", dest="user", help="SSH username. If omitted, Port_Config prompts interactively.")
     parser.add_argument(
         "-p", "--password", "--pasword",
         dest="password",
@@ -522,7 +602,31 @@ Unchanged lines are intentionally omitted.
     parser.add_argument("--comparison-dir", default="Comparisons", help="HTML comparison root directory (default: Comparisons)")
     parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
 
+    interactive_launch = len(sys.argv) == 1
     args = parser.parse_args()
+
+    # A+B behavior: no arguments opens a guided operator menu; any supplied
+    # command-line arguments keep the normal professional CLI workflow.
+    if interactive_launch:
+        menu_overrides = interactive_operation_menu()
+        for key, value in menu_overrides.items():
+            setattr(args, key, value)
+
+    # Interactive fallbacks keep the CLI convenient for manual operations while
+    # preserving full non-interactive behavior when arguments are supplied.
+    if not args.user:
+        while True:
+            entered_user = input("SSH Username: ").strip()
+            if entered_user:
+                args.user = entered_user
+                break
+            print("Username cannot be empty.")
+
+    # If no input source was provided, default to an inventory-file workflow.
+    # Direct-host and --execute modes never trigger this prompt.
+    if not args.host_file and not args.host and not args.execute:
+        entered_host_file = input("Host file [hosts.csv]: ").strip()
+        args.host_file = entered_host_file or "hosts.csv"
 
     if args.host and not args.ports:
         parser.error("--host/-ho requires --Port with at least one interface")
