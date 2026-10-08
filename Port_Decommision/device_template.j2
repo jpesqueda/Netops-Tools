@@ -1,0 +1,41 @@
+Device_Name:{{ hostname }}
+!
+! ===================================================================
+! PRE-VALIDATION
+! ===================================================================
+{% for port in ports %}
+show interfaces {{ port.interface }} status
+show mac address-table interface {{ port.interface }}
+!
+{% endfor %}
+! ===================================================================
+! CONFIGURATION
+! ===================================================================
+config t
+{% for port in ports %}
+{% if port.config_allowed %}
+interface {{ port.interface }}
+ description {{ port.inventory.get("description", "UNUSED_PORT") or "UNUSED_PORT" }}
+ shutdown
+exit
+!
+{% else %}
+!!!! {{ port.interface }} - {{ port.warning or 'REVIEW REQUIRED' }}
+!interface {{ port.interface }}
+! description {{ port.inventory.get("description", "UNUSED_PORT") or "UNUSED_PORT" }}
+! shutdown
+!exit
+!
+{% endif %}
+{% endfor %}
+end
+wr
+!
+! ===================================================================
+! POST-VALIDATION
+! ===================================================================
+{% for port in ports %}
+show interfaces {{ port.interface }} status
+show mac address-table interface {{ port.interface }}
+!
+{% endfor %}
