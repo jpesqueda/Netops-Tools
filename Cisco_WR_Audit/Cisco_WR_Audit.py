@@ -9,15 +9,15 @@ Inputs:
 
 Behavior:
     - Connects over SSH using Netmiko.
-    - Detects user EXEC vs privileged EXEC and enters enable if necessary.
+    - Uses SSH session privileges as-is; does not enter or check enable mode.
     - Reads IOS-XE version, runs `write memory`, and checks startup-config readability.
     - Runs batches of up to 20 switches concurrently, with a 30-second delay
       BETWEEN batches (defaults; configurable).
     - Writes a detailed CSV (including Failure Reason and raw WR output) while
       printing only Hostname / Version / WR Status.
 
-NOTE: Reading startup-config confirms access/readability, but is not a byte-for-byte
-comparison with running-config. PASS also requires a positive [OK] from write memory.
+NOTE: Reading startup-config confirms readability, not that the running-config was
+saved. PASS requires explicit successful write-memory output.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ import re
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 
 from netmiko import ConnectHandler
@@ -50,21 +50,23 @@ ERROR_PATTERN = re.compile(
     r"\bI/O error\b|\bunable to\b|\breadonly\b|\bread-only\b)",
     re.I,
 )
-SUCCESS_PATTERN = re.compile(r"\[OK\]", re.I)
-CSV_HEADERS = ["Hostname", "Version", "Status of WR", "Failure Reason", "Initial Mode",
-               "Final Mode", "WR Output", "Startup Config Check", "Error"]
+SUCCESS_PATTERN = re.compile(r"\[\s*OK\s*\]|\b(?:copy complete|configuration saved successfully)\b", re.I)
+CSV_HEADERS = ["Hostname", "Version", "Status of WR", "Failure Reason",
+               "WR Output", "Startup Config Check", "Error"]
 
 
 def classify_failure(status: str, error: str, wr_output: str = "") -> str:
     """Classify failures without replacing the complete original Cisco response."""
     if status == "PASS":
         return "NONE"
-    if status == "ENABLE ERROR":
-        return "ENABLE ERROR"
     if status == "AUTH ERROR":
         return "AUTH ERROR"
     if status == "SSH ERROR":
         return "SSH ERROR"
+    if status == "PRIVILEGE ERROR":
+        return "PRIVILEGE ERROR"
+    if status == "WR TIMEOUT":
+        return "WR TIMEOUT"
     combined = f"{wr_output} {error}"
     if re.search(r"not enough space|no space left|insufficient (?:disk )?space", combined, re.I):
         return "NO SPACE"
@@ -86,16 +88,16 @@ class Result:
     version: str = "N/A"
     status: str = "ERROR"
     failure_reason: str = "OTHER ERROR"
-    initial_mode: str = "UNKNOWN"
-    final_mode: str = "UNKNOWN"
     wr_output: str = ""
     startup_check: str = "NOT RUN"
     error: str = ""
 
     def csv_row(self) -> dict[str, str]:
         self.failure_reason = classify_failure(self.status, self.error, self.wr_output)
-        vals = asdict(self)
-        return dict(zip(CSV_HEADERS, vals.values()))
+        return {"Hostname": self.hostname, "Version": self.version,
+                "Status of WR": self.status, "Failure Reason": self.failure_reason,
+                "WR Output": self.wr_output, "Startup Config Check": self.startup_check,
+                "Error": self.error}
 
 
 def single_line(value: str) -> str:
@@ -127,77 +129,72 @@ def load_hosts(path: Path) -> list[str]:
 
 
 # ----------------------------- Device audit -------------------------------
-def audit(host: str, username: str, password: str, secret: str,
-          conn_timeout: int, cmd_timeout: int) -> Result:
+def audit(host: str, username: str, password: str,
+          conn_timeout: int, cmd_timeout: int, wr_timeout: int) -> Result:
     result = Result(hostname=host)
     conn = None
     try:
         conn = ConnectHandler(
             device_type="cisco_ios", host=host, username=username,
-            password=password, secret=secret,
+            password=password,
             conn_timeout=conn_timeout, auth_timeout=conn_timeout,
             banner_timeout=conn_timeout, timeout=cmd_timeout,
             fast_cli=False,
         )
 
-        # Determine privilege state BEFORE running a save command.
-        already_enabled = conn.check_enable_mode()
-        result.initial_mode = "PRIVILEGED" if already_enabled else "USER EXEC"
-        if not already_enabled:
-            if not secret:
-                result.status = "ENABLE ERROR"
-                result.error = "Enable password required but not provided"
-                return result
-            try:
-                conn.enable()
-            except Exception as exc:
-                result.status = "ENABLE ERROR"
-                result.error = f"Unable to enter enable mode: {exc}"
-                return result
-        if not conn.check_enable_mode():
-            result.status = "ENABLE ERROR"
-            result.error = "Device did not enter privileged EXEC mode"
-            return result
-        result.final_mode = "PRIVILEGED"
-
         # Get the actual software release.
         version_output = conn.send_command("show version", read_timeout=cmd_timeout)
         result.version = find_version(version_output)
 
-        # Preserve original device output (including file open / space errors).
-        raw = conn.send_command_timing(
-            "write memory", read_timeout=cmd_timeout,
-            strip_prompt=False, strip_command=False,
-        )
-        # Avoid executing a confirmation without explicit device-specific support.
-        result.wr_output = single_line(raw)
+        # Save exactly ONCE and wait for the device to finish sending output.
+        # A larger last_read helps with delayed [OK] on Catalyst 9K.
+        try:
+            raw = conn.send_command_timing(
+                "write memory", read_timeout=wr_timeout, last_read=6.0,
+                strip_prompt=False, strip_command=False,
+            )
+            result.wr_output = single_line(raw)
+        except Exception as exc:
+            if isinstance(exc, (TimeoutError, NetmikoTimeoutException)) or type(exc).__name__ == "ReadTimeout":
+                result.status = "WR TIMEOUT"
+                result.error = f"No completed WR response within {wr_timeout}s: {exc}"
+                return result
+            raise
 
-        # Failure must win over [OK] if mixed messages appear.
-        match = ERROR_PATTERN.search(raw)
-        if match:
+        # Never interpret a real Cisco error as success.
+        if re.search(r"(?i)%\s*(invalid input|authorization failed|access denied|privilege)", raw):
+            result.status = "PRIVILEGE ERROR"
+            result.error = result.wr_output
+            return result
+        if ERROR_PATTERN.search(raw):
             result.status = "FAIL"
             result.error = result.wr_output
             return result
         if not SUCCESS_PATTERN.search(raw):
             result.status = "UNVERIFIED"
-            result.error = "No [OK] confirmation from write memory; check WR Output"
+            result.error = "No explicit WR success marker; inspect WR Output. WR not retried."
             return result
 
-        # Sanity check: startup-config can be read after successful save.
-        startup = conn.send_command(
-            "show startup-config | include ^version", read_timeout=cmd_timeout
-        )
-        if ERROR_PATTERN.search(startup) or re.search(r"%\s*(Invalid input|Ambiguous command)", startup, re.I):
-            result.status = "FAIL"
+        # Optional post-save readability check. This is not an equality check
+        # and must not turn an explicitly successful write into UNVERIFIED just
+        # because the startup configuration lacks a 'version' line.
+        result.status = "PASS"
+        try:
+            startup = conn.send_command(
+                "show startup-config | include ^version", read_timeout=cmd_timeout
+            )
+            if ERROR_PATTERN.search(startup) or re.search(
+                r"%\s*(Invalid input|Ambiguous command|Authorization failed)", startup, re.I
+            ):
+                result.startup_check = "ERROR"
+                result.error = f"Startup read check: {single_line(startup)}"
+            elif re.search(r"(?m)^version\s+\S+", startup):
+                result.startup_check = "READABLE"
+            else:
+                result.startup_check = "INCONCLUSIVE"
+        except Exception as exc:
             result.startup_check = "ERROR"
-            result.error = single_line(startup)
-        elif not re.search(r"(?m)^version\s+\S+", startup):
-            result.status = "UNVERIFIED"
-            result.startup_check = "NOT CONFIRMED"
-            result.error = f"No version line found in startup-config: {single_line(startup)}"
-        else:
-            result.status = "PASS"
-            result.startup_check = "READABLE"
+            result.error = f"Startup read check failed: {type(exc).__name__}: {exc}"
         return result
 
     except NetmikoAuthenticationException as exc:
@@ -230,13 +227,14 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--batch-size", type=int, default=20, help="Concurrent hosts per batch (default 20)")
     p.add_argument("--batch-delay", type=float, default=30, help="Seconds between batches (default 30)")
     p.add_argument("--conn-timeout", type=int, default=15)
-    p.add_argument("--cmd-timeout", type=int, default=45)
+    p.add_argument("--cmd-timeout", type=int, default=45, help="Read timeout for show commands")
+    p.add_argument("--wr-timeout", type=int, default=120, help="Timeout for write memory (default 120s)")
     return p
 
 
 def main() -> int:
     args = parser().parse_args()
-    if args.batch_size < 1 or args.batch_delay < 0 or args.conn_timeout < 1 or args.cmd_timeout < 1:
+    if args.batch_size < 1 or args.batch_delay < 0 or args.conn_timeout < 1 or args.cmd_timeout < 1 or args.wr_timeout < 1:
         parser().error("Invalid batch/timeout setting")
     try:
         hosts = load_hosts(Path(args.hosts))
@@ -249,7 +247,6 @@ def main() -> int:
         console.print("[red]ERROR: Username is required[/red]")
         return 2
     password = getpass.getpass("SSH Password: ")
-    secret = getpass.getpass("Enable Password (press Enter if same as SSH / not needed): ") or password
 
     console.print("\n[bold]CISCO WR AUDIT[/bold]")
     console.print(f"Devices: {len(hosts)} | Batch size: {args.batch_size} | Pause: {args.batch_delay:g}s")
@@ -266,7 +263,7 @@ def main() -> int:
         batch_results: dict[str, Result] = {}
         with ThreadPoolExecutor(max_workers=args.batch_size) as pool:
             future_map = {
-                pool.submit(audit, h, username, password, secret, args.conn_timeout, args.cmd_timeout): h
+                pool.submit(audit, h, username, password, args.conn_timeout, args.cmd_timeout, args.wr_timeout): h
                 for h in batch
             }
             for future in as_completed(future_map):
