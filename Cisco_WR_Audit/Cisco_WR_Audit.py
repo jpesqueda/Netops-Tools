@@ -14,7 +14,7 @@ Behavior:
     - Runs batches of up to 20 switches concurrently, with a 30-second delay
       BETWEEN batches (defaults; configurable).
     - Writes a detailed CSV (including Failure Reason and raw WR output) while
-      printing only Hostname / Version / WR Status.
+      printing only Hostname / Model / Version / WR Status.
 
 NOTE: Reading startup-config confirms readability, not that the running-config was
 saved. PASS requires explicit successful write-memory output.
@@ -51,7 +51,7 @@ ERROR_PATTERN = re.compile(
     re.I,
 )
 SUCCESS_PATTERN = re.compile(r"\[\s*OK\s*\]|\b(?:copy complete|configuration saved successfully)\b", re.I)
-CSV_HEADERS = ["Hostname", "Version", "Status of WR", "Failure Reason",
+CSV_HEADERS = ["Hostname", "Model", "Version", "Status of WR", "Failure Reason",
                "WR Output", "Startup Config Check", "Error"]
 
 
@@ -85,6 +85,7 @@ def classify_failure(status: str, error: str, wr_output: str = "") -> str:
 @dataclass
 class Result:
     hostname: str
+    model: str = "N/A"
     version: str = "N/A"
     status: str = "ERROR"
     failure_reason: str = "OTHER ERROR"
@@ -94,7 +95,7 @@ class Result:
 
     def csv_row(self) -> dict[str, str]:
         self.failure_reason = classify_failure(self.status, self.error, self.wr_output)
-        return {"Hostname": self.hostname, "Version": self.version,
+        return {"Hostname": self.hostname, "Model": self.model, "Version": self.version,
                 "Status of WR": self.status, "Failure Reason": self.failure_reason,
                 "WR Output": self.wr_output, "Startup Config Check": self.startup_check,
                 "Error": self.error}
@@ -110,6 +111,25 @@ def find_version(output: str) -> str:
         match = regex.search(output)
         if match:
             return match.group(1)
+    return "UNKNOWN"
+
+
+def find_model(output: str) -> str:
+    """Identify Catalyst 9K model from show version (including stack members)."""
+    # Common IOS-XE output: Model Number : C9300-48P
+    matches = re.findall(r"(?im)^\s*Model Number\s*:\s*(C9\d{3}[\w-]*)", output)
+    if matches:
+        return ", ".join(dict.fromkeys(m.upper() for m in matches))
+
+    # Hardware description: cisco C9300-48P (X86) processor...
+    match = re.search(r"(?im)^\s*cisco\s+(C9\d{3}[\w-]*)\s+\(", output)
+    if match:
+        return match.group(1).upper()
+
+    # Switch stack table: Switch Ports Model SW Version...
+    models = re.findall(r"(?im)^\s*\*?\s*\d+\s+\d+\s+(C9\d{3}[\w-]*)\s+", output)
+    if models:
+        return ", ".join(dict.fromkeys(m.upper() for m in models))
     return "UNKNOWN"
 
 
@@ -145,6 +165,7 @@ def audit(host: str, username: str, password: str,
         # Get the actual software release.
         version_output = conn.send_command("show version", read_timeout=cmd_timeout)
         result.version = find_version(version_output)
+        result.model = find_model(version_output)
 
         # Save exactly ONCE and wait for the device to finish sending output.
         # A larger last_read helps with delayed [OK] on Catalyst 9K.
@@ -284,11 +305,12 @@ def main() -> int:
 
     table = Table(title="Cisco WR Audit")
     table.add_column("Hostname")
+    table.add_column("Model")
     table.add_column("Version")
     table.add_column("Status of WR")
     for r in rows:
         color = "green" if r.status == "PASS" else "red"
-        table.add_row(r.hostname, r.version, f"[{color}]{r.status}[/{color}]")
+        table.add_row(r.hostname, r.model, r.version, f"[{color}]{r.status}[/{color}]")
     console.print(table)
     console.print(f"\nCSV saved: [bold]{output_path.resolve()}[/bold]")
     console.print(f"PASS: {sum(r.status == 'PASS' for r in rows)} | Non-PASS: {sum(r.status != 'PASS' for r in rows)}")
