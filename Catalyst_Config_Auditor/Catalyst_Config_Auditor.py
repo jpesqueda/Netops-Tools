@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Standalone Catalyst Configuration Auditor v1.0.1 — offline/SSH extraction and roundtrip checks.
+"""Standalone Catalyst Configuration Auditor v1.1.0 — offline/SSH extraction and roundtrip checks.
 
 Author: peskicorp. Read-only on network equipment.
 """
@@ -24,7 +24,8 @@ from jinja2 import Environment, StrictUndefined
 import csv
 import difflib
 import html
-from collections import Counter
+from collections import Counter, defaultdict
+import ipaddress
 from copy import deepcopy
 
 
@@ -143,11 +144,20 @@ fields are parameterized. No assertion of corporate configuration compliance.
 IP = r'(?:\d{1,3}\.){3}\d{1,3}'
 SECRET = re.compile(r'(?i)(password|secret|key-string|private-key|certificate|crypto pki|tacacs-server key|snmp-server community|username\s+\S+\s+(?:secret|password))')
 
+def valid_ipv4(value):
+    try:
+        ipaddress.IPv4Address(value)
+        return True
+    except ipaddress.AddressValueError:
+        return False
+
 def extract(raw):
     result = {
       'hostname': None, 'ntp_servers': [], 'tacacs_servers': [],
-      'vlans': [], 'svis': [], 'interfaces': [],
-      'bgp': {'enabled': False, 'asn': None, 'neighbors': []},
+      'vlans': [], 'svis': [], 'interfaces': [], 'loopbacks': [], 'routed_interfaces': [],
+      'ip_addresses': [], 'ip_helpers': [], 'ip_references': [], 'ipv6_addresses': [],
+      'interface_defaults': {'data_vlan': None, 'voice_vlan': None}, 'access_interfaces': [],
+      'bgp': {'enabled': False, 'asn': None, 'neighbors': [], 'router_id': None, 'neighbor_addresses': []},
       'ospf': {'enabled': False, 'processes': []},
       'aaa': {'enabled':False, 'commands':[]},
       'warnings': [], 'extraction': {'parameterized_lines':0, 'preserved_lines':0},
@@ -190,12 +200,12 @@ def extract(raw):
             if a:
                 name=a.group(1)
                 if re.match(r'(?i)^Vlan\d+$',name):
-                    svi={'name':name,'description':None,'ip':None,'mask':None,'vrf':None,'shutdown':None}
+                    svi={'name':name,'description':None,'ip':None,'mask':None,'vrf':None,'shutdown':None,'ip_addresses':[], 'ipv6_addresses':[], 'helpers':[]}
                     result['svis'].append(svi)
                     current=('svis',len(result['svis'])-1)
                 else:
                     number=re.search(r'(?:Ethernet)(\d+)/',name,re.I)
-                    intf={'name':name,'member':int(number.group(1)) if number else None,'description':None,'mode':None,'data_vlan':None,'voice_vlan':None,'shutdown':None}
+                    intf={'name':name,'member':int(number.group(1)) if number else None,'description':None,'mode':None,'data_vlan':None,'voice_vlan':None,'shutdown':None, 'ip_addresses':[], 'ipv6_addresses':[], 'helpers':[], 'vrf':None}
                     result['interfaces'].append(intf)
                     current=('interfaces',len(result['interfaces'])-1)
                 replace(i,'interface '+item_token(current[0],current[1],'name'),text)
@@ -226,6 +236,22 @@ def extract(raw):
                 addr=a.group(1); start=text.find(addr)
                 replace(i,text[:start]+item_token('ntp_servers',len(result['ntp_servers'])-1,'address')+text[start+len(addr):],text)
                 continue
+            # Global IP-valued commands that are safe to parameterize by position.
+            ref_patterns = [
+                (r'^(ip route(?: vrf \S+)?\s+\S+\s+\S+\s+)('+IP+r')(\b.*)$', 'static_route_next_hop'),
+                (r'^(logging host(?: vrf \S+)?\s+)('+IP+r')(\b.*)$', 'syslog_host'),
+                (r'^(ntp source\s+)('+IP+r')(\b.*)$', 'ntp_source_ip'),
+            ]
+            found=False
+            for pat,kind in ref_patterns:
+                match=re.fullmatch(pat,text)
+                if match and valid_ipv4(match.group(2)):
+                    j=len(result['ip_references'])
+                    result['ip_references'].append({'kind':kind,'address':match.group(2),'command':text})
+                    replace(i,match.group(1)+item_token('ip_references',j,'address')+match.group(3),text)
+                    found=True
+                    break
+            if found: continue
             if text.startswith('aaa '):
                 result['aaa']['enabled']=True
                 if not SECRET.search(text):result['aaa']['commands'].append(text)
@@ -234,6 +260,40 @@ def extract(raw):
             kind,idx=current
             prefix=text[:len(text)-len(text.lstrip())]
             obj=(result[kind][idx] if kind in ('vlans','svis','interfaces','tacacs_servers') else None)
+            if kind in ('svis','interfaces'):
+                obj=result[kind][idx]
+                ip_match=re.fullmatch(r'ip address\s+('+IP+r')\s+('+IP+r')(\s+secondary)?',stripped)
+                if ip_match and valid_ipv4(ip_match.group(1)) and valid_ipv4(ip_match.group(2)):
+                    ai=len(obj['ip_addresses'])
+                    addr={'ip':ip_match.group(1),'mask':ip_match.group(2),'secondary':bool(ip_match.group(3))}
+                    obj['ip_addresses'].append(addr)
+                    result['ip_addresses'].append({'interface':obj['name'],**addr})
+                    replace(i,prefix+'ip address '+item_token(kind,idx,'ip_addresses')[:-3]+'['+str(ai)+'].ip }} '+item_token(kind,idx,'ip_addresses')[:-3]+'['+str(ai)+'].mask }}'+(ip_match.group(3) or ''),text)
+                    # Keep existing primary SVI fields for backwards compatibility.
+                    if kind=='svis' and obj['ip'] is None and not addr['secondary']:
+                        obj['ip'],obj['mask']=addr['ip'],addr['mask']
+                ipv6=re.fullmatch(r'ipv6 address\s+([0-9a-fA-F:]+(?:/\d{1,3})?)(.*)',stripped)
+                if ipv6:
+                    try:
+                        ipaddress.IPv6Interface(ipv6.group(1)) if '/' in ipv6.group(1) else ipaddress.IPv6Address(ipv6.group(1))
+                    except ValueError: pass
+                    else:
+                        vi=len(obj['ipv6_addresses'])
+                        obj['ipv6_addresses'].append({'address':ipv6.group(1),'options':ipv6.group(2).strip()})
+                        result['ipv6_addresses'].append({'interface':obj['name'],'address':ipv6.group(1)})
+                        start=text.find(ipv6.group(1))
+                        replace(i,text[:start]+item_token(kind,idx,'ipv6_addresses')[:-3]+'['+str(vi)+'].address }}'+text[start+len(ipv6.group(1)):],text)
+                helper=re.fullmatch(r'ip helper-address(?:\s+global)?\s+('+IP+r')',stripped)
+                if helper and valid_ipv4(helper.group(1)):
+                    hi=len(obj['helpers'])
+                    obj['helpers'].append(helper.group(1))
+                    result['ip_helpers'].append({'interface':obj['name'],'address':helper.group(1)})
+                    start=text.rfind(helper.group(1))
+                    replace(i,text[:start]+item_token(kind,idx,'helpers')[:-3]+'['+str(hi)+'] }}',text)
+                vrf=re.fullmatch(r'(?:vrf forwarding|ip vrf forwarding)\s+(\S+)',stripped)
+                if vrf:obj['vrf']=vrf.group(1)
+                if kind=='interfaces' and re.match(r'(?i)^Loopback\d+$',obj['name']):
+                    pass
             if kind=='vlans':
                 m=re.fullmatch(r'name\s+(.+)',stripped)
                 if m:
@@ -258,7 +318,8 @@ def extract(raw):
                     if m and obj['ip'] is None:
                         obj['ip']=m.group(1);obj['mask']=m.group(2)
                         suffix=' secondary' if stripped.endswith(' secondary') else ''
-                        replace(i,prefix+'ip address '+item_token(kind,idx,'ip')+' '+item_token(kind,idx,'mask')+suffix,text)
+                        # Already parameterized generically above via ip_addresses.
+                        pass
                     m=re.fullmatch(r'vrf forwarding\s+(\S+)',stripped)
                     if m:obj['vrf']=m.group(1)
             elif kind=='tacacs_servers':
@@ -267,16 +328,53 @@ def extract(raw):
                     obj['ip']=m.group(1)
                     replace(i,prefix+'address ipv4 '+item_token(kind,idx,'ip')+m.group(2),text)
             elif kind=='bgp':
+                rid=re.fullmatch(r'bgp router-id\s+('+IP+r')',stripped)
+                if rid and valid_ipv4(rid.group(1)):
+                    result['bgp']['router_id']=rid.group(1)
+                    replace(i,prefix+'bgp router-id {{ bgp.router_id }}',text)
+                # All neighbor references use their own entries, even when repeated
+                # in different address families; avoids losing ordering and intent.
+                neighbor=re.fullmatch(r'(neighbor\s+)('+IP+r')(\s+.*)',stripped)
+                if neighbor and valid_ipv4(neighbor.group(2)):
+                    ni=len(result['bgp']['neighbor_addresses'])
+                    result['bgp']['neighbor_addresses'].append({'ip':neighbor.group(2),'statement':stripped})
+                    replace(i,prefix+neighbor.group(1)+item_token('bgp.neighbor_addresses',ni,'ip')+neighbor.group(3),text)
                 m=re.fullmatch(r'neighbor\s+(\S+)\s+remote-as\s+(\S+)',stripped)
                 if m:
                     result['bgp']['neighbors'].append({'address':m.group(1),'remote_as':m.group(2)})
                     ni=len(result['bgp']['neighbors'])-1
-                    replace(i,prefix+'neighbor {{ bgp.neighbors['+str(ni)+'].address }} remote-as {{ bgp.neighbors['+str(ni)+'].remote_as }}',text)
+                    # Neighbor IP is replaced above; remote-as stays literal.
             elif kind=='ospf':
                 m=re.fullmatch(r'router-id\s+('+IP+r')',stripped)
                 if m:
                     result['ospf']['processes'][idx]['router_id']=m.group(1)
                     replace(i,prefix+'router-id {{ ospf.processes['+str(idx)+'].router_id }}',text)
+    # Produce categorized interface addresses and a compact access inventory.
+    for interface in result['interfaces']:
+        if re.match(r'(?i)^Loopback\d+$', interface['name']):
+            result['loopbacks'].append({'name':interface['name'], 'ip_addresses':interface['ip_addresses']})
+        elif interface['ip_addresses'] or interface['ipv6_addresses']:
+            result['routed_interfaces'].append({'name':interface['name'], 'ip_addresses':interface['ip_addresses'], 'ipv6_addresses':interface['ipv6_addresses'], 'vrf':interface['vrf']})
+    eligible=[it for it in result['interfaces'] if it['mode']=='access' and (it['data_vlan'] is not None or it['voice_vlan'] is not None)]
+    for field in ('data_vlan','voice_vlan'):
+        frequencies=Counter(it[field] for it in eligible if it[field] is not None)
+        if frequencies:result['interface_defaults'][field]=frequencies.most_common(1)[0][0]
+    for it in eligible:
+        item={'name':it['name']}
+        for field in ('data_vlan','voice_vlan'):
+            if it[field] != result['interface_defaults'][field]:item[field]=it[field]
+        result['access_interfaces'].append(item)
+    # Reuse shared access VLAN defaults inside the full lossless template.
+    for idx,interface in enumerate(result['interfaces']):
+        if interface['mode']!='access':continue
+        for field,command in (('data_vlan','switchport access vlan'),('voice_vlan','switchport voice vlan')):
+            if interface[field] is None or interface[field]!=result['interface_defaults'][field]:continue
+            replacement_key='{{ interfaces['+str(idx)+'].'+field+' }}'
+            for k,value in list(replacements.items()):
+                if value.strip()==command+' '+replacement_key:
+                    replacements[k]=value.replace(replacement_key,'{{ interface_defaults.'+field+' }}')
+    # Parameterize all NTP addresses only when they are literal IP addresses.
+    # Existing command text is kept for roundtrip and protected as sensitive.
     if not result['hostname']:result['warnings'].append('Hostname not found.')
     if result['aaa']['enabled'] and not result['aaa']['commands']:
         result['warnings'].append('AAA commands present but none safe to export.')
@@ -286,7 +384,21 @@ def extract(raw):
     result['warnings'].append('Unrecognized and sensitive lines are retained literally in the template; protect output like a running-config.')
     return result,template
 
-__version__='1.0.1'
+def compact_access_template():
+    # Optional partial template: interface membership is explicit; defaults and
+    # exceptions are resolved with a loop, not guessed from port count.
+    return '''{# Access-port fragment only: not a full-device configuration. #}
+{% for port in access_interfaces %}
+interface {{ port.name }}
+ switchport mode access
+{% set data_vlan = port.data_vlan if port.data_vlan is defined else interface_defaults.data_vlan %}
+{% set voice_vlan = port.voice_vlan if port.voice_vlan is defined else interface_defaults.voice_vlan %}
+{% if data_vlan is not none %} switchport access vlan {{ data_vlan }}
+{% endif %}{% if voice_vlan is not none %} switchport voice vlan {{ voice_vlan }}
+{% endif %}!
+{% endfor %}'''
+
+__version__='1.1.0'
 __author__='peskicorp'
 console=Console()
 
@@ -305,6 +417,9 @@ EXAMPLES="""Examples:
 
   Process a previously saved running-config without SSH:
     python Catalyst_Config_Auditor.py --from-config SW01_running.cfg --model C9300-24P --extract
+
+  Interactive render (asks for missing template / variables):
+    python Catalyst_Config_Auditor.py --generate
 
   Render template using edited YAML (offline):
     python Catalyst_Config_Auditor.py --generate --template SW01.j2 --variables SW01.yaml -o Rendered
@@ -343,7 +458,7 @@ def cli(argv=None):
     a=p.parse_args(argv)
     if a.workers<1 or a.workers>100:p.error('--workers must be between 1 and 100')
     if a.generate or a.audit:
-        if not a.template or not a.variables:p.error('--generate/--audit require --template and --variables')
+        if a.audit and (not a.template or not a.variables):p.error('--audit requires --template and --variables')
         if a.audit and not a.from_config:p.error('--audit requires --from-config')
         if a.backup or a.extract:p.error('--generate/--audit cannot be combined with --backup/--extract')
     else:
@@ -386,6 +501,7 @@ def process(target,raw,outputs,warnings,args):
         template_file=folder/'Templates'/f'{safe_name(facts.hostname)}.j2'
         save_text(variable_file,yaml.safe_dump(data,sort_keys=False,allow_unicode=True),args.overwrite)
         save_text(template_file,templ,args.overwrite)
+        save_text(folder/'Templates'/'Compact_Access.j2',compact_access_template(),args.overwrite)
         rebuilt=render(templ,data)
         save_text(folder/'Reports'/'Reconstructed_Config.cfg',rebuilt,args.overwrite)
         passed=(rebuilt==raw)
@@ -406,6 +522,10 @@ def main(argv=None):
     console.print(f'\n[bold cyan]CATALYST CONFIG AUDITOR[/bold cyan] v{__version__} — [dim]peskicorp[/dim]')
     root=Path(args.output)
     if args.generate or args.audit:
+        if args.generate:
+            args.template=args.template or input('Jinja2 Template: ').strip()
+            args.variables=args.variables or input('Variables YAML: ').strip()
+            if not args.template or not args.variables:raise ValueError('Template and variables are required')
         values=yaml.safe_load(Path(args.variables).read_text(encoding='utf-8'))
         if not isinstance(values,dict):raise ValueError('Variables YAML must be a mapping')
         expected=render(Path(args.template).read_text(encoding='utf-8'),values)
