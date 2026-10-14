@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 """Cisco Catalyst 9000 IOS-XE write-memory audit.
 
+Version: 1.2.0
+
 Requirements:
     pip install netmiko rich
 
 Inputs:
-    hosts.txt: one hostname or IP per line; blank lines and # comments ignored.
+    -ho/--host: one hostname/IP; -hf/--host-file: path with one device per line.
+    If neither option is passed, select the source interactively.
 
 Behavior:
     - Connects over SSH using Netmiko.
     - Uses SSH session privileges as-is; does not enter or check enable mode.
-    - Reads IOS-XE version, runs `write memory`, and checks startup-config readability.
+    - Reads IOS-XE version, runs `write memory`, captures prompt/confirmation, and checks startup-config readability.
     - Runs batches of up to 20 switches concurrently, with a 30-second delay
       BETWEEN batches (defaults; configurable).
     - Writes a detailed CSV (including Failure Reason and raw WR output) while
@@ -36,6 +39,8 @@ from netmiko import ConnectHandler
 from netmiko.exceptions import NetmikoAuthenticationException, NetmikoTimeoutException
 from rich.console import Console
 from rich.table import Table
+
+__version__ = "1.2.0"
 
 console = Console()
 
@@ -157,6 +162,8 @@ def audit(host: str, username: str, password: str,
         conn = ConnectHandler(
             device_type="cisco_ios", host=host, username=username,
             password=password,
+            use_keys=False, allow_agent=False,
+            ssh_strict=False, system_host_keys=False,
             conn_timeout=conn_timeout, auth_timeout=conn_timeout,
             banner_timeout=conn_timeout, timeout=cmd_timeout,
             fast_cli=False,
@@ -167,18 +174,34 @@ def audit(host: str, username: str, password: str,
         result.version = find_version(version_output)
         result.model = find_model(version_output)
 
-        # Save exactly ONCE and wait for the device to finish sending output.
-        # A larger last_read helps with delayed [OK] on Catalyst 9K.
+        # Execute WR ONCE. Keep the full response even when Cisco outputs only
+        # "Building configuration...". Waiting for the prompt proves that the
+        # command returned; it does NOT itself prove that the write succeeded.
+        #
+        # A read timeout means unknown device outcome; never blindly retry.
         try:
-            raw = conn.send_command_timing(
-                "write memory", read_timeout=wr_timeout, last_read=6.0,
-                strip_prompt=False, strip_command=False,
+            prompt = conn.find_prompt().strip()
+            # Explicit terminal prompt, including user EXEC or privileged EXEC.
+            # With the newline anchor a hostname mentioned in the output cannot
+            # cause a false early match.
+            expect_prompt = rf"(?m)^{re.escape(prompt)}\s*$"
+            raw = conn.send_command(
+                "write memory",
+                expect_string=expect_prompt,
+                read_timeout=wr_timeout,
+                strip_prompt=False,
+                strip_command=False,
+                cmd_verify=False,
             )
             result.wr_output = single_line(raw)
         except Exception as exc:
             if isinstance(exc, (TimeoutError, NetmikoTimeoutException)) or type(exc).__name__ == "ReadTimeout":
                 result.status = "WR TIMEOUT"
-                result.error = f"No completed WR response within {wr_timeout}s: {exc}"
+                result.error = (
+                    f"WR did not return to prompt within {wr_timeout}s; "
+                    f"write result UNKNOWN; do not retry automatically. "
+                    f"{type(exc).__name__}: {exc}"
+                )
                 return result
             raise
 
@@ -191,15 +214,8 @@ def audit(host: str, username: str, password: str,
             result.status = "FAIL"
             result.error = result.wr_output
             return result
-        if not SUCCESS_PATTERN.search(raw):
-            result.status = "UNVERIFIED"
-            result.error = "No explicit WR success marker; inspect WR Output. WR not retried."
-            return result
-
-        # Optional post-save readability check. This is not an equality check
-        # and must not turn an explicitly successful write into UNVERIFIED just
-        # because the startup configuration lacks a 'version' line.
-        result.status = "PASS"
+        # Check startup readability even if IOS-XE omits [OK] in WR output.
+        # This check must not promote a missing WR confirmation to PASS.
         try:
             startup = conn.send_command(
                 "show startup-config | include ^version", read_timeout=cmd_timeout
@@ -216,6 +232,15 @@ def audit(host: str, username: str, password: str,
         except Exception as exc:
             result.startup_check = "ERROR"
             result.error = f"Startup read check failed: {type(exc).__name__}: {exc}"
+
+        if SUCCESS_PATTERN.search(raw):
+            result.status = "PASS"
+        else:
+            result.status = "UNVERIFIED"
+            details = "No explicit [OK] returned by WR; command returned to prompt."
+            if result.startup_check == "READABLE":
+                details += " Startup config is readable, but a successful save is not proven."
+            result.error = f"{details} {result.error}".strip()
         return result
 
     except NetmikoAuthenticationException as exc:
@@ -241,16 +266,49 @@ def audit(host: str, username: str, password: str,
 
 # -------------------------- CLI / batch scheduler -------------------------
 def parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="Catalyst 9K IOS-XE WR audit with batch throttling")
-    p.add_argument("--hosts", default="hosts.txt", help="One hostname/IP per line")
-    p.add_argument("--output", default="Cisco_WR_Audit.csv", help="Output CSV path")
-    p.add_argument("--username", help="SSH username (prompted if omitted)")
-    p.add_argument("--batch-size", type=int, default=20, help="Concurrent hosts per batch (default 20)")
-    p.add_argument("--batch-delay", type=float, default=30, help="Seconds between batches (default 30)")
-    p.add_argument("--conn-timeout", type=int, default=15)
-    p.add_argument("--cmd-timeout", type=int, default=45, help="Read timeout for show commands")
-    p.add_argument("--wr-timeout", type=int, default=120, help="Timeout for write memory (default 120s)")
+    p = argparse.ArgumentParser(
+        description="Catalyst 9K IOS-XE WR audit with batch throttling",
+        epilog=("Examples:\n"
+                "  python Cisco_WR_Audit.py -ho SW01 -u admin\n"
+                "  python Cisco_WR_Audit.py -hf devices.txt -u admin -o results.csv\n"
+                "  python Cisco_WR_Audit.py  (interactive prompts)"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    sources = p.add_mutually_exclusive_group()
+    sources.add_argument("-ho", "--host", help="Single hostname/IP to audit")
+    sources.add_argument("-hf", "--host-file", help="Text file with one hostname/IP per line")
+    p.add_argument("-u", "--username", help="SSH username (prompted if omitted)")
+    p.add_argument("-p", "--password", help="SSH password (securely prompted if omitted)")
+    p.add_argument("-o", "--output", default="Cisco_WR_Audit.csv", help="Output CSV path (default: Cisco_WR_Audit.csv)")
+    p.add_argument("--batch-size", type=int, default=20, help="Concurrent hosts per batch (default: 20)")
+    p.add_argument("--batch-delay", type=float, default=30, help="Seconds between batches (default: 30)")
+    p.add_argument("--conn-timeout", type=int, default=15, help="SSH connection timeout (default: 15s)")
+    p.add_argument("--cmd-timeout", type=int, default=45, help="Show command timeout (default: 45s)")
+    p.add_argument("--wr-timeout", type=int, default=120, help="Write memory timeout (default: 120s)")
     return p
+
+
+def interactive_hosts() -> list[str]:
+    """Ask for a single device or file only when CLI supplied neither."""
+    while True:
+        source = input("Host or host file? [ho/hf]: ").strip().lower()
+        if source in ("ho", "host", "1"):
+            host = input("Hostname/IP: ").strip()
+            if host:
+                return [host]
+            console.print("[red]ERROR: Hostname/IP is required[/red]")
+        elif source in ("hf", "host-file", "2"):
+            path = input("Host file path: ").strip().strip('"')
+            if not path:
+                console.print("[red]ERROR: File path is required[/red]")
+                continue
+            try:
+                return load_hosts(Path(path))
+            except (OSError, ValueError) as exc:
+                console.print(f"[red]ERROR: {exc}[/red]")
+        else:
+            console.print("[yellow]Enter ho for a device or hf for a file.[/yellow]")
 
 
 def main() -> int:
@@ -258,19 +316,30 @@ def main() -> int:
     if args.batch_size < 1 or args.batch_delay < 0 or args.conn_timeout < 1 or args.cmd_timeout < 1 or args.wr_timeout < 1:
         parser().error("Invalid batch/timeout setting")
     try:
-        hosts = load_hosts(Path(args.hosts))
-    except (OSError, ValueError) as exc:
+        if args.host:
+            hosts = [args.host.strip()]
+            if not hosts[0]:
+                raise ValueError("Hostname/IP is required")
+        elif args.host_file:
+            hosts = load_hosts(Path(args.host_file))
+        else:
+            hosts = interactive_hosts()
+    except (OSError, ValueError, EOFError, KeyboardInterrupt) as exc:
         console.print(f"[red]ERROR: {exc}[/red]")
         return 2
 
-    username = args.username or input("SSH Username: ").strip()
-    if not username:
-        console.print("[red]ERROR: Username is required[/red]")
+    try:
+        username = args.username if args.username is not None else input("SSH Username: ").strip()
+        if not username.strip():
+            console.print("[red]ERROR: Username is required[/red]")
+            return 2
+        password = args.password if args.password is not None else getpass.getpass("SSH Password: ")
+    except (EOFError, KeyboardInterrupt):
+        console.print("[red]ERROR: Credential input cancelled[/red]")
         return 2
-    password = getpass.getpass("SSH Password: ")
 
-    console.print("\n[bold]CISCO WR AUDIT[/bold]")
-    console.print(f"Devices: {len(hosts)} | Batch size: {args.batch_size} | Pause: {args.batch_delay:g}s")
+    console.print(f"\n[bold]CISCO WR AUDIT v{__version__}[/bold]")
+    console.print(f"Devices: {len(hosts)} | Batch size: {args.batch_size} | Pause: {args.batch_delay:g}s | WR read timeout: {args.wr_timeout}s")
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     rows: list[Result] = []
