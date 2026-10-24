@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Catalyst Config Auditor v1.2.1 — standalone read-only collector, Excel, YAML and Jinja2 renderer.
+"""Catalyst Config Auditor v1.2.2 — standalone read-only collector, Excel, YAML and Jinja2 renderer.
 
 Dependencies: pip install netmiko pyyaml jinja2
 Excel output is implemented with Python's standard-library ZIP/XML writer (no Excel package).
@@ -21,7 +21,7 @@ from zipfile import ZipFile, ZIP_DEFLATED
 import yaml
 from jinja2 import Environment, FileSystemLoader, StrictUndefined, TemplateError
 
-VERSION = '1.2.1'
+VERSION = '1.2.2'
 DEFAULT_COMMANDS = ['show version', 'show inventory', 'show switch', 'show interfaces status',
                     'show ip interface brief', 'show ip bgp summary']
 DEFAULT_SELECTION = {
@@ -29,10 +29,10 @@ DEFAULT_SELECTION = {
   'hostname': True,
   'banner': {'serial_number': True, 'location': True, 'city': False},
   'vlans': {'enabled': True, 'ids': []},
-  'svis': {'enabled': True, 'include_all': True, 'fields': ['name','description','shutdown','ip_addresses','helpers']},
+  'svis': {'enabled': True, 'include_all': True, 'fields': ['name','description','shutdown','ip_addresses']},
   'loopbacks': {'enabled': True, 'include_all': True},
   'routed_interfaces': {'enabled': True, 'include_all': True},
-  'bgp': {'enabled': True, 'fields': ['asn','router_id','neighbors']},
+  'bgp': {'enabled': True, 'fields': ['asn','router_id','neighbors'], 'include_passwords': True},
   'interfaces': {'enabled': True, 'mode': 'access', 'fields': ['name','access_vlan','voice_vlan','description'],
                  'compact': False},
   'ntp': {'enabled': False}, 'tacacs': {'enabled': False}, 'ospf': {'enabled': False}
@@ -43,6 +43,7 @@ EXAMPLES = '''EXAMPLES:
   python Catalyst_Config_Auditor.py -hf hosts.txt -AIO -o Results -w 20
   python Catalyst_Config_Auditor.py -ho SW01 --backup
   python Catalyst_Config_Auditor.py -ho SW01 --excel --cmd-file cmd.txt
+  python Catalyst_Config_Auditor.py -ho SW01 -AIO --cmd-file cmd.txt
   python Catalyst_Config_Auditor.py -hf hosts.txt --excel --yaml -w 20
   python Catalyst_Config_Auditor.py -hf hosts.txt --backup --excel --yaml -o AuditResults
   python Catalyst_Config_Auditor.py -ho SW01 --yaml --selection variables_selection.yaml
@@ -57,6 +58,9 @@ NOTES:
   --excel creates one Excel workbook per device; sheets: Summary + one per command.
   --yaml requires a running-config, obtained automatically via SSH or --from-config.
   --create_config only reads local files and does NOT connect to a switch.
+  Prompts for command file on --excel/-AIO unless --cmd-file is specified.
+  YAML creates SW01.yaml and interface.yaml; sample_9k.j2 is a starter, not full recovery config.
+  BGP passwords may be sensitive; selection include_passwords must be explicitly approved.
   Outputs per device use Backups/ and Variables/ only.
   Neither SSH collection nor rendering changes device configuration.
   Passwords supplied with -p can be visible to other local processes.
@@ -77,7 +81,7 @@ def cli(argv=None):
     p.add_argument('--excel',action='store_true',help='One XLSX workbook per device, Summary and command sheets')
     p.add_argument('--yaml',action='store_true',help='Extract only selected YAML variables')
     p.add_argument('--create_config',action='store_true',help='Render local Jinja2 + YAML into a Cisco config (offline)')
-    p.add_argument('--cmd-file',default='cmd.txt',help='Command list for --excel (default: cmd.txt)')
+    p.add_argument('--cmd-file',help='Command list for --excel; asks interactively when omitted (default cmd.txt)')
     p.add_argument('--selection',default='variables_selection.yaml',help='YAML field selection file')
     p.add_argument('--template',help='Jinja2 template for --create_config')
     p.add_argument('--variables',help='YAML variable file for --create_config')
@@ -229,15 +233,11 @@ def config_extract(config, facts, selection):
         if not m:continue
         name=m.group(1);ch=b['children']
         description=next((c[12:] for c in ch if c.startswith('description ')),None)
-        helpers=[]
-        for c in ch:
-            hm=re.fullmatch(r'ip helper-address(?:\s+(?:global|vrf\s+\S+))?\s+(\S+)',c)
-            if hm:helpers.append(hm.group(1))
         data=next((int(x.split()[-1]) for x in ch if re.fullmatch(r'switchport access vlan\s+\d+',x)),None)
         voice=next((int(x.split()[-1]) for x in ch if re.fullmatch(r'switchport voice vlan\s+\d+',x)),None)
         mode=next((x.split()[-1] for x in ch if x.startswith('switchport mode ')),None)
         it={'name':name,'description':description,'shutdown':True if 'shutdown' in ch else False if 'no shutdown' in ch else None,
-            'ip_addresses':parse_ip_lines(ch),'helpers':helpers,'access_vlan':data,'voice_vlan':voice,'mode':mode}
+            'ip_addresses':parse_ip_lines(ch),'access_vlan':data,'voice_vlan':voice,'mode':mode}
         iface_data.append(it)
     def enabled(key):
         item=selection.get(key,{})
@@ -281,7 +281,7 @@ def config_extract(config, facts, selection):
                 if m:rid=m.group(1)
                 m=re.match(r'^neighbor\s+(\S+)\s+(.+)$',c)
                 if m:
-                    addr=m.group(1);entry=neighbors.setdefault(addr,{'address':addr,'remote_as':None,'description':None,'password_type':None,'timers':None})
+                    addr=m.group(1);entry=neighbors.setdefault(addr,{'address':addr,'remote_as':None,'description':None,'password_type':None,'password':None,'timers':None})
                     attr=m.group(2)
                     remote=re.fullmatch(r'remote-as\s+(\S+)',attr)
                     if remote:entry['remote_as']=remote.group(1)
@@ -289,8 +289,16 @@ def config_extract(config, facts, selection):
                     if desc:entry['description']=desc.group(1)
                     timers=re.fullmatch(r'timers\s+(\d+)\s+(\d+)',attr)
                     if timers:entry['timers']={'keepalive':int(timers.group(1)),'holdtime':int(timers.group(2))}
-                    passwd=re.match(r'password\s+(\d+)',attr)
-                    if passwd:entry['password_type']=passwd.group(1) # never export password
+                    passwd=re.fullmatch(r'password(?:\s+(\d+))?\s+(.+)',attr)
+                    if passwd:
+                        entry['password_type']=passwd.group(1)
+                        if cfg.get('include_passwords',False):
+                            entry['password']=passwd.group(2)
+                            # WARNING: May be encrypted type 7 or plaintext (type 0).
+                    # Some IOS-XE releases use neighbor ... password from AF / inherited peers.
+
+            if not cfg.get('include_passwords',False):
+                for entry in neighbors.values(): entry.pop('password',None)
             bgp={'enabled':True,'asn':asn,'router_id':rid,'neighbors':list(neighbors.values())}
         fields=cfg.get('fields',[])
         out['bgp']={'enabled':bgp['enabled'],**{k:v for k,v in bgp.items() if k!='enabled' and (not fields or k in fields)}}
@@ -369,15 +377,23 @@ def command_table(command,output):
             parts=re.split(r'\s{2,}',line.strip())
             if len(parts)>=5 and parts[0].lower()!='interface': entries.append(parts[:5])
         if entries:return ['Interface','IP Address','OK?','Method','Status / Protocol'],entries
-    if c in ('show interfaces status','show interface status'):
+    if c in ('show interfaces status','show interface status','sh interfaces status'):
+        # Parse from the RIGHT so descriptions containing spaces (including very long
+        # descriptions) do not merge with Status. Supported IOS-XE statuses vary.
         entries=[]
-        for line in output.splitlines():
-            if line.lower().lstrip().startswith('port ') or not line.strip():continue
-            p=re.split(r'\s{2,}',line.strip())
-            if len(p)>=3:entries.append(p)
-        if entries:
-            count=max(len(x) for x in entries)
-            return (['Port','Name','Status','Vlan','Duplex','Speed','Type'][:count] if count<=7 else ['Column '+str(i) for i in range(1,count+1)]),entries
+        status_pat=r'(?:notconnect|connected|disabled|err-disabled|inactive|monitoring|suspended|sfpAbsent|xcvrAbsen|notpresent|faulty|up|down|unassigned|channelDown|onboard|secure-shutdown)'
+        for raw in output.splitlines():
+            line=raw.rstrip()
+            if not line.strip() or re.match(r'^\s*Port\s+Name\s+Status\s+Vlan',line,re.I): continue
+            # Port, arbitrary-length Name, Status, VLAN, Duplex, Speed, Type
+            m=re.match(r'^\s*(\S+)\s+(.*?)\s+('+status_pat+r')\s+(\S+)\s+(\S+)\s+(\S+)(?:\s+(.*))?\s*$',line,re.I)
+            if m:
+                port,name,status,vlan,duplex,speed,ptype=m.groups()
+                entries.append([port,name.strip(),status,vlan,duplex,speed,(ptype or '').strip()])
+            else:
+                # A short or unknown-status line is kept intact rather than misaligned.
+                entries.append([line.strip(),'','','','','','UNPARSED - review raw output'])
+        if entries:return ['Port','Name','Status','Vlan','Duplex','Speed','Type'],entries
     if c=='show inventory':
         rows=[];name=None;descr=None
         for line in output.splitlines():
@@ -395,6 +411,44 @@ def command_table(command,output):
     # Preserve every line, including blanks (one cell per source line).
     return ['Raw output'],[[line] for line in output.splitlines()] or [['(empty output)']]
 
+def sample_jinja(data):
+    """Starter template based solely on the extracted and selected fields.
+
+    This is NOT a complete write-erase replacement. Review missing global lines,
+    interface roles, feature dependencies, and any credential handling.
+    """
+    parts=['! EXAMPLE ONLY — REVIEW BEFORE ANY NETWORK CHANGE',
+           'hostname {{ hostname }}', '!']
+    if 'vlans' in data:
+        parts+=['{% for vlan in vlans %}', 'vlan {{ vlan.id }}',
+                '{% if vlan.name %} name {{ vlan.name }}{% endif %}',
+                '!','{% endfor %}']
+    if 'svis' in data:
+        parts+=['{% for svi in svis %}', 'interface {{ svi.name }}',
+                '{% if svi.description %} description {{ svi.description }}{% endif %}',
+                '{% for ip in svi.ip_addresses %} ip address {{ ip.ip }} {{ ip.mask }}{% if ip.secondary %} secondary{% endif %}',
+                '{% endfor %}', '!', '{% endfor %}']
+    if 'loopback_interfaces' in data:
+        parts+=['{% for lo in loopback_interfaces %}', 'interface {{ lo.name }}',
+                '{% for ip in lo.ip_addresses %} ip address {{ ip.ip }} {{ ip.mask }}{% if ip.secondary %} secondary{% endif %}',
+                '{% endfor %}', '!', '{% endfor %}']
+    parts+=['! Interface values read from separate interface.yaml',
+            "{% for intf in interfaces %}", 'interface {{ intf.name }}',
+            '{% if intf.description %} description {{ intf.description }}{% endif %}',
+            ' switchport mode access',
+            '{% if intf.access_vlan is not none %} switchport access vlan {{ intf.access_vlan }}{% endif %}',
+            '{% if intf.voice_vlan is not none %} switchport voice vlan {{ intf.voice_vlan }}{% endif %}',
+            '!', '{% endfor %}']
+    if data.get('bgp',{}).get('enabled'):
+        parts+=['router bgp {{ bgp.asn }}',
+                '{% if bgp.router_id %} bgp router-id {{ bgp.router_id }}{% endif %}',
+                '{% for peer in bgp.neighbors %}',
+                '{% if peer.remote_as %} neighbor {{ peer.address }} remote-as {{ peer.remote_as }}{% endif %}',
+                '{% if peer.description %} neighbor {{ peer.address }} description {{ peer.description }}{% endif %}',
+                '{% if peer.get("password") %} neighbor {{ peer.address }} password{% if peer.password_type %} {{ peer.password_type }}{% endif %} {{ peer.password }}{% endif %}',
+                '{% endfor %}', '!']
+    return '\n'.join(parts)+'\n'
+
 def render_config(args):
     tp=args.template or input('Jinja2 Template: ').strip()
     vp=args.variables or input('Variables YAML: ').strip()
@@ -402,6 +456,13 @@ def render_config(args):
     tpath,vpath=Path(tp),Path(vp)
     data=yaml.safe_load(vpath.read_text(encoding='utf-8-sig'))
     if not isinstance(data,dict):raise ValueError('Variables YAML must be a mapping')
+    ipath=vpath.parent/'interface.yaml'
+    if ipath.exists():
+        interface_data=yaml.safe_load(ipath.read_text(encoding='utf-8-sig')) or {}
+        if not isinstance(interface_data,dict) or not isinstance(interface_data.get('interfaces'),list):
+            raise ValueError(f'Invalid interface.yaml: {ipath}')
+        data['interfaces']=interface_data['interfaces']
+
     env=Environment(loader=FileSystemLoader(str(tpath.parent or Path('.'))),undefined=StrictUndefined,autoescape=False,keep_trailing_newline=True)
     generated=env.get_template(tpath.name).render(**data)
     hostname=safe_filename(data.get('hostname') or vpath.stem)
@@ -428,6 +489,15 @@ def device_process(target, outputs, errors, args, commands, selection):
         data=config_extract(running,facts,selection)
         p=ensure_write(variables/f'{name}.yaml',args.overwrite)
         p.write_text(yaml.safe_dump(data,sort_keys=False,allow_unicode=True,width=120),encoding='utf-8');paths.append(p)
+        interface_data={'interfaces':data.pop('interfaces',[])}
+        # Re-write main YAML without the access-port list; interface.yaml owns it.
+        p.write_text(yaml.safe_dump(data,sort_keys=False,allow_unicode=True,width=120),encoding='utf-8')
+        ifile=ensure_write(variables/'interface.yaml',args.overwrite)
+        ifile.write_text(yaml.safe_dump(interface_data,sort_keys=False,allow_unicode=True,width=120),encoding='utf-8');paths.append(ifile)
+        data['interfaces']=interface_data['interfaces']
+        jpath=ensure_write(variables/'sample_9k.j2',args.overwrite)
+        jpath.write_text(sample_jinja(data),encoding='utf-8');paths.append(jpath)
+
     if args.excel:
         available=[c for c in commands]
         success=sum(bool(outputs.get(c,'')) and c not in errors for c in available)
@@ -449,7 +519,11 @@ def main(argv=None):
     print('='*74+'\n CATALYST CONFIG AUDITOR v'+VERSION+'\n'+'='*74)
     try:
         if args.create_config:return render_config(args)
-        commands=read_commands(args.cmd_file) if args.excel else []
+        cmd_path=args.cmd_file
+        if args.excel and not cmd_path:
+            try: cmd_path=input('Command file [cmd.txt]: ').strip() or 'cmd.txt'
+            except EOFError: cmd_path='cmd.txt'
+        commands=read_commands(cmd_path) if args.excel else []
         selection=read_selection(args.selection) if args.yaml else {}
         if args.from_config:
             file=Path(args.from_config)
