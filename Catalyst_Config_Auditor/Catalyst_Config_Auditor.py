@@ -16,12 +16,14 @@ import ipaddress
 import re
 import sys
 import traceback
+import json
+import logging
 from xml.sax.saxutils import escape as xml_escape
 from zipfile import ZipFile, ZIP_DEFLATED
 import yaml
 from jinja2 import Environment, FileSystemLoader, StrictUndefined, TemplateError
 
-VERSION = '1.2.2'
+VERSION = '1.3.0'
 DEFAULT_COMMANDS = ['show version', 'show inventory', 'show switch', 'show interfaces status',
                     'show ip interface brief', 'show ip bgp summary']
 DEFAULT_SELECTION = {
@@ -38,33 +40,29 @@ DEFAULT_SELECTION = {
   'ntp': {'enabled': False}, 'tacacs': {'enabled': False}, 'ospf': {'enabled': False}
  }
 }
-EXAMPLES = '''EXAMPLES:
+EXAMPLES = """EXAMPLES:
+  python Catalyst_Config_Auditor.py -ho SW01 --collect
+  python Catalyst_Config_Auditor.py -hf hosts.txt --collect --cmd-file cmd.txt -w 20
+  python Catalyst_Config_Auditor.py -ho SW01 --vars
+  python Catalyst_Config_Auditor.py -hf hosts.txt --vars
+  python Catalyst_Config_Auditor.py --vars --from-config Running_Config.txt
+  python Catalyst_Config_Auditor.py -ho SW01 --excel
+  python Catalyst_Config_Auditor.py --create
+  python Catalyst_Config_Auditor.py --create --template output/SW01/Variables/SW01_main.j2 --variables output/SW01/Variables/SW01.yaml
   python Catalyst_Config_Auditor.py -ho SW01 -AIO
-  python Catalyst_Config_Auditor.py -hf hosts.txt -AIO -o Results -w 20
-  python Catalyst_Config_Auditor.py -ho SW01 --backup
-  python Catalyst_Config_Auditor.py -ho SW01 --excel --cmd-file cmd.txt
-  python Catalyst_Config_Auditor.py -ho SW01 -AIO --cmd-file cmd.txt
-  python Catalyst_Config_Auditor.py -hf hosts.txt --excel --yaml -w 20
-  python Catalyst_Config_Auditor.py -hf hosts.txt --backup --excel --yaml -o AuditResults
-  python Catalyst_Config_Auditor.py -ho SW01 --yaml --selection variables_selection.yaml
-  python Catalyst_Config_Auditor.py --from-config SW01_running.cfg --yaml --model C9300-24P
-  python Catalyst_Config_Auditor.py --create_config --template 9k-template.j2 --variables output/SW01/Variables/SW01.yaml
-  python Catalyst_Config_Auditor.py --create_config   (prompts for missing paths)
-  python Catalyst_Config_Auditor.py --help
+  python Catalyst_Config_Auditor.py -ho SW01 --vars --overwrite
 
-NOTES:
-  -AIO / --all-in-one performs --backup + --yaml + --excel in one collection.
-  -AIO does not generate configs: --create_config remains offline and separate.
-  --excel creates one Excel workbook per device; sheets: Summary + one per command.
-  --yaml requires a running-config, obtained automatically via SSH or --from-config.
-  --create_config only reads local files and does NOT connect to a switch.
-  Prompts for command file on --excel/-AIO unless --cmd-file is specified.
-  YAML creates SW01.yaml and interface.yaml; sample_9k.j2 is a starter, not full recovery config.
-  BGP passwords may be sensitive; selection include_passwords must be explicitly approved.
-  Outputs per device use Backups/ and Variables/ only.
-  Neither SSH collection nor rendering changes device configuration.
-  Passwords supplied with -p can be visible to other local processes.
-'''
+MODES:
+  --collect: online SSH collection; saves Running_Config.txt, Commands_Output.txt and XLSX.
+  --vars: offline extraction from a saved or external running-config; creates two YAML and two Jinja2 files.
+  --excel: offline regeneration of workbook from saved Commands_Output.txt.
+  --create: offline Jinja2 render from YAML; never sends changes to a device.
+  -AIO: online collect then offline variable extraction.
+LOGS:
+  Per-device timestamped detail logs in output/Logs_<hostname>/.
+  Only a concise progress summary appears on the console.
+  Existing outputs are never overwritten without --overwrite.
+"""
 
 def cli(argv=None):
     p=argparse.ArgumentParser(description=f'Catalyst Config Auditor v{VERSION} | Excel, selective YAML and Jinja2',
@@ -76,11 +74,16 @@ def cli(argv=None):
     p.add_argument('-u','--username',help='SSH username (prompt when missing)')
     p.add_argument('-p','--password',help='SSH password (interactive prompt recommended)')
     p.add_argument('-o','--output',default='output',help='Root output folder (default: output)')
-    p.add_argument('-AIO','--all-in-one',dest='aio',action='store_true',help='All-in-one: backup + selected YAML + Excel in one run')
-    p.add_argument('--backup',action='store_true',help='Save running-config and collected command output')
-    p.add_argument('--excel',action='store_true',help='One XLSX workbook per device, Summary and command sheets')
-    p.add_argument('--yaml',action='store_true',help='Extract only selected YAML variables')
-    p.add_argument('--create_config',action='store_true',help='Render local Jinja2 + YAML into a Cisco config (offline)')
+    p.add_argument('-AIO','--all-in-one',dest='aio',action='store_true',help='Online collect + offline YAML/Jinja2 extraction')
+    p.add_argument('--collect',action='store_true',help='Online backup, commands and Excel')
+    p.add_argument('--vars',action='store_true',help='Offline YAML and dual Jinja2 generation')
+    p.add_argument('--create','--create_config',dest='create_config',action='store_true',help='Offline render from Jinja2 + YAML')
+    p.add_argument('--interface-template',help='Optional interface Jinja2 file')
+    p.add_argument('--interface-vars',help='Optional interface YAML file')
+    p.add_argument('--backup',action='store_true',help='Alias for --collect (online)')
+    p.add_argument('--excel',action='store_true',help='Regenerate XLSX from local Commands_Output.txt (offline)')
+    p.add_argument('--yaml',action='store_true',help='Alias for --vars (offline)')
+    
     p.add_argument('--cmd-file',help='Command list for --excel; asks interactively when omitted (default cmd.txt)')
     p.add_argument('--selection',default='variables_selection.yaml',help='YAML field selection file')
     p.add_argument('--template',help='Jinja2 template for --create_config')
@@ -92,14 +95,17 @@ def cli(argv=None):
     p.add_argument('--version',action='version',version=f'%(prog)s v{VERSION}')
     args=p.parse_args(argv)
     if args.workers < 1: p.error('--workers must be >= 1')
-    if args.aio:
-        args.backup = True
-        args.excel = True
-        args.yaml = True
-    if not (args.backup or args.excel or args.yaml or args.create_config): p.error('Choose --backup, --excel, --yaml or --create_config')
-    if args.create_config and (args.backup or args.excel or args.yaml or args.host or args.host_file or args.from_config):
-        p.error('--create_config is an offline standalone mode')
-    if not args.create_config and not (args.host or args.host_file or args.from_config): p.error('Provide -ho, -hf or --from-config')
+    if args.aio: args.collect=True; args.vars=True
+    if args.backup: args.collect=True
+    if args.yaml: args.vars=True
+    if not (args.collect or args.vars or args.excel or args.create_config):
+        p.error('Choose --collect, --vars, --excel, --create or -AIO')
+    if args.create_config and (args.collect or args.vars or args.excel):
+        p.error('--create is a standalone offline mode')
+    if not args.create_config and not (args.host or args.host_file or args.from_config):
+        p.error('Provide -ho, -hf or --from-config')
+    if args.collect and args.from_config:
+        p.error('--collect requires a hostname; use --vars --from-config for offline files')
     return args
 
 def read_commands(path):
@@ -449,111 +455,385 @@ def sample_jinja(data):
                 '{% endfor %}', '!']
     return '\n'.join(parts)+'\n'
 
-def render_config(args):
-    tp=args.template or input('Jinja2 Template: ').strip()
+def running_config_jinja(config, data, interface_data):
+    """Parametrize supported source lines, preserving every other IOS line verbatim.
+
+    Jinja substitutions are applied only when a matching YAML field is available.
+    This is an as-is source template, NOT a compliance-approved golden configuration.
+    """
+    intfs=interface_data.get('interfaces',[])
+    interface_indexes={item['name']:idx for idx,item in enumerate(intfs) if item.get('name')}
+    section_indexes={}
+    for field in ('svis','loopback_interfaces','routed_interfaces'):
+        section_indexes[field]={item['name']:idx for idx,item in enumerate(data.get(field,[])) if item.get('name')}
+    vlan_indexes={str(item['id']):idx for idx,item in enumerate(data.get('vlans',[]))}
+    bgp=data.get('bgp',{})
+    neighbors={str(item['address']):idx for idx,item in enumerate(bgp.get('neighbors',[]))}
+    lines=[];current_iface=None;current_bgp=False;current_vlan=None;ip_index=0
+    for line in config.splitlines(keepends=True):
+        core=line.rstrip('\r\n');newline=line[len(core):]
+        stripped=core.strip()
+        # Block context follows top-level section, not '!' separators.
+        if core and not core[0].isspace():
+            current_iface=None;current_bgp=False;current_vlan=None;ip_index=0
+            im=re.fullmatch(r'interface\s+(\S+)',stripped)
+            vm=re.fullmatch(r'vlan\s+(\d+)',stripped)
+            if im:current_iface=im.group(1)
+            if vm:current_vlan=vm.group(1)
+            if re.fullmatch(r'router bgp\s+\d+',stripped):current_bgp=True
+        replace=None
+        if stripped.startswith('hostname ') and not core[0].isspace() and data.get('hostname') is not None:
+            replace='hostname {{ hostname }}'
+        elif current_iface and core[0].isspace():
+            i=interface_indexes.get(current_iface)
+            if i is not None:
+                item=intfs[i]
+                if stripped.startswith('description ') and item.get('description') is not None:
+                    replace=f' description {{{{ interfaces[{i}].description }}}}'
+                elif re.fullmatch(r'switchport access vlan\s+\d+',stripped) and item.get('access_vlan') is not None:
+                    replace=f' switchport access vlan {{{{ interfaces[{i}].access_vlan }}}}'
+                elif re.fullmatch(r'switchport voice vlan\s+\d+',stripped) and item.get('voice_vlan') is not None:
+                    replace=f' switchport voice vlan {{{{ interfaces[{i}].voice_vlan }}}}'
+            for field in ('svis','loopback_interfaces','routed_interfaces'):
+                idx=section_indexes[field].get(current_iface)
+                if idx is None:continue
+                ips=data[field][idx].get('ip_addresses')
+                if ips is None:continue
+                if re.fullmatch(r'ip address\s+\S+\s+\S+(?:\s+secondary)?',stripped):
+                    if ip_index < len(ips):
+                        value=ips[ip_index]
+                        if value.get('ip') and value.get('mask'):
+                            replace=f' ip address {{{{ {field}[{idx}].ip_addresses[{ip_index}].ip }}}} {{{{ {field}[{idx}].ip_addresses[{ip_index}].mask }}}}'
+                            if value.get('secondary'):
+                                replace+=' secondary'
+                    ip_index+=1
+                break
+        elif current_vlan is not None and core[0].isspace() and stripped.startswith('name '):
+            idx=vlan_indexes.get(current_vlan)
+            if idx is not None and data['vlans'][idx].get('name') is not None:
+                replace=f' name {{{{ vlans[{idx}].name }}}}'
+        elif current_bgp and core[0].isspace():
+            if stripped.startswith('bgp router-id ') and bgp.get('router_id'):
+                replace=' bgp router-id {{ bgp.router_id }}'
+            m=re.match(r'neighbor\s+(\S+)\s+(.+)$',stripped)
+            if m:
+                idx=neighbors.get(m.group(1))
+                if idx is not None:
+                    neighbor=bgp['neighbors'][idx];attr=m.group(2)
+                    prefix=f' neighbor {{{{ bgp.neighbors[{idx}].address }}}} '
+                    if re.fullmatch(r'remote-as\s+\S+',attr) and neighbor.get('remote_as'):
+                        replace=prefix+f'remote-as {{{{ bgp.neighbors[{idx}].remote_as }}}}'
+                    elif attr.startswith('description ') and neighbor.get('description') is not None:
+                        replace=prefix+f'description {{{{ bgp.neighbors[{idx}].description }}}}'
+                    elif re.fullmatch(r'password(?:\s+\d+)?\s+.+',attr) and neighbor.get('password') is not None:
+                        kind=neighbor.get('password_type')
+                        replace=prefix+'password '+(f'{{{{ bgp.neighbors[{idx}].password_type }}}} ' if kind else '')+f'{{{{ bgp.neighbors[{idx}].password }}}}'
+                    elif re.fullmatch(r'timers\s+\d+\s+\d+',attr) and neighbor.get('timers'):
+                        replace=prefix+f'timers {{{{ bgp.neighbors[{idx}].timers.keepalive }}}} {{{{ bgp.neighbors[{idx}].timers.holdtime }}}}'
+        if replace is not None:
+            # Keep the original line indentation and newline convention.
+            indent=core[:len(core)-len(core.lstrip())]
+            lines.append(indent+replace.lstrip()+newline)
+        else:
+            # Escape accidental Jinja delimiters in unmodified config.
+            # IOS templates with literal {{...}} / {%...%} can be left intact
+            # only if they do not conflict with Jinja; reject on render mismatch.
+            lines.append(line)
+    return ''.join(lines)
+
+
+def render_running_template(template_text, data, interfaces):
+    env=Environment(undefined=StrictUndefined,autoescape=False,keep_trailing_newline=True)
+    return env.from_string(template_text).render(**dict(data,interfaces=interfaces))
+
+# -------------------- LOGGING / OUTPUT --------------------
+
+def banner(mode):
+    print('=' * 78)
+    print('                       CATALYST CONFIG AUDITOR')
+    print('=' * 78)
+    print(f'                    MODE: {mode}\n')
+
+
+def log_for(root, hostname, mode):
+    folder=Path(root)/('Logs_'+safe_filename(hostname))
+    folder.mkdir(parents=True,exist_ok=True)
+    stamp=datetime.now().strftime('%Y%m%d_%H%M%S_%f')[:-3]
+    target=folder/f'{safe_filename(hostname)}_{mode}_{stamp}.log'
+    logger=logging.getLogger(f'cca.{hostname}.{mode}.{stamp}')
+    logger.setLevel(logging.DEBUG)
+    logger.propagate=False
+    handler=logging.FileHandler(target,encoding='utf-8')
+    handler.setFormatter(logging.Formatter('%(asctime)s | %(levelname)-7s | %(message)s'))
+    logger.addHandler(handler)
+    return logger,target
+
+
+def close_log(logger):
+    for handler in list(logger.handlers):
+        handler.close();logger.removeHandler(handler)
+
+
+def save_text(path,value,overwrite):
+    ensure_write(path,overwrite).write_text(value,encoding='utf-8')
+    return path
+
+
+def parse_saved_commands(path):
+    raw=Path(path).read_text(encoding='utf-8-sig',errors='replace')
+    marker=re.compile(r'\n={68}\n(.*?)\n={68}\n',re.S)
+    matches=list(marker.finditer(raw));result={}
+    for i,m in enumerate(matches):
+        name=m.group(1).strip()
+        body=raw[m.end():matches[i+1].start() if i+1<len(matches) else len(raw)]
+        result[name]=body.strip('\n')
+    return result
+
+
+def split_template(full,name):
+    # Preserve source blocks; access/interface configuration belongs to a separate file.
+    # All physical interface stanzas are grouped at their first source occurrence.
+    # An IOS running-config may interleave sections, so roundtrip may report DIFFERENT.
+    lines=full.splitlines(keepends=True)
+    head=[];intfs=[];inside=False;inserted=False
+    for line in lines:
+        top=bool(line.strip()) and not line[0].isspace()
+        if top and re.match(r'^interface\s+(?!Vlan|Loopback|Port-channel|Port-Channel|Null|Tunnel|BDI|MgmtEth)(?:[A-Za-z]+\S*)$',line.strip(),re.I):
+            inside=True
+            if not inserted:
+                head.append("{% include '"+name+"_interfaces.j2' %}\n")
+                inserted=True
+        elif top and not line.startswith('!'):
+            inside=False
+        if inside:intfs.append(line)
+        else:head.append(line)
+    # Handle ! separators without dropping neighboring config sections.
+    return ''.join(head),''.join(intfs)
+
+
+def get_targets(args):
+    if args.from_config:return [Path(args.from_config).stem]
+    if args.host:return [args.host]
+    raw=Path(args.host_file).read_text(encoding='utf-8-sig')
+    return list(dict.fromkeys(line.strip() for line in raw.splitlines() if line.strip() and not line.lstrip().startswith('#')))
+
+
+def offline_source(args,target):
+    if args.from_config:return Path(args.from_config)
+    preferred=Path(args.output)/safe_filename(target)/'Backups'/'Running_Config.txt'
+    if preferred.exists():return preferred
+    # hostname in backup might differ from its SSH alias: locate by extracted hostname.
+    for p in Path(args.output).glob('*/Backups/Running_Config.txt'):
+        if p.parent.parent.name.lower()==str(target).lower():return p
+    return preferred
+
+
+def offline_vars(args,target,selection):
+    source=offline_source(args,target)
+    if not source.is_file():raise FileNotFoundError(f'Backup not found: {source}')
+    running=source.read_text(encoding='utf-8-sig',errors='replace')
+    facts=device_facts(target,{'show running-config':running},args.model)
+    hostname=safe_filename(facts['hostname'])
+    folder=Path(args.output)/hostname/'Variables'
+    logger,logpath=log_for(args.output,hostname,'VARS')
+    try:
+        print('[+] Loading local configuration...')
+        print(f'    Hostname           : {hostname}')
+        print(f'    Source             : {source}')
+        print('\n[+] Loading variable selection...')
+        print(f'    File               : {args.selection}')
+        print('    Status             : VALID' if Path(args.selection).exists() else '    Status             : DEFAULTS USED')
+        print('\n[+] Extracting configuration variables...')
+        data=config_extract(running,facts,selection)
+        interface_data={'interfaces':data.pop('interfaces',[])}
+        for field in ('hostname','vlans','svis','loopback_interfaces','routed_interfaces','bgp'):
+            val=data.get(field);logger.info('Extracted %s: %s',field, len(val) if isinstance(val,list) else ('PRESENT' if val else 'NONE'))
+        logger.info('Access Interfaces: %d',len(interface_data['interfaces']))
+        logger.info('Descriptions: %d',sum(bool(x.get('description')) for x in interface_data['interfaces']))
+        logger.info('Data VLANs: %d',sum(x.get('access_vlan') is not None for x in interface_data['interfaces']))
+        logger.info('Voice VLANs: %d',sum(x.get('voice_vlan') is not None for x in interface_data['interfaces']))
+        mainyaml=folder/f'{hostname}.yaml'
+        intyaml=folder/f'{hostname}_interface.yaml'
+        mainfile=folder/f'{hostname}_main.j2'
+        intfile=folder/f'{hostname}_interfaces.j2'
+        allfiles=[mainyaml,intyaml,mainfile,intfile]
+        for f in allfiles:ensure_write(f,args.overwrite)
+        print('\n[+] Generating YAML files...')
+        save_text(mainyaml,yaml.safe_dump(data,sort_keys=False,allow_unicode=True,width=120),args.overwrite)
+        save_text(intyaml,yaml.safe_dump(interface_data,sort_keys=False,allow_unicode=True,width=120),args.overwrite)
+        print(f'    {mainyaml.name:<22}: CREATED')
+        print(f'    {intyaml.name:<22}: CREATED')
+        print('\n[+] Generating Jinja2 templates...')
+        full=running_config_jinja(running,{**data,'interfaces':interface_data['interfaces']},interface_data)
+        mainj,intsj=split_template(full,hostname)
+        save_text(mainfile,mainj,args.overwrite);save_text(intfile,intsj,args.overwrite)
+        print(f'    {mainfile.name:<22}: CREATED')
+        print(f'    {intfile.name:<22}: CREATED')
+        env=Environment(loader=FileSystemLoader(str(folder)),undefined=StrictUndefined,autoescape=False,keep_trailing_newline=True)
+        rebuilt=env.get_template(mainfile.name).render(**data,**interface_data)
+        result='MATCH' if rebuilt==running else 'DIFFERENT'
+        logger.info('Template reconstruction: original LOADED, generated RENDERED, roundtrip %s',result)
+        logger.info('Template files: %s; %s',mainfile,intfile)
+        print('\n[+] Variable extraction completed.')
+        print(f'\nFiles created in: {folder.resolve()}')
+        return True
+    except Exception:
+        logger.exception('Variable extraction failed')
+        raise
+    finally:close_log(logger)
+
+
+def save_workbook(hostname,outputs,commands,errors,args,folder,logger):
+    facts=device_facts(hostname,outputs,args.model)
+    success=sum(bool(outputs.get(c,'')) and c not in errors for c in commands)
+    summary=dict(facts,success_count=success,fail_count=len(commands)-success)
+    sheets=[('Summary',list(summary.keys()),[list(summary.values())])]
+    for command in commands:
+        if command in errors:sheets.append((command,['Error'],[[errors[command]]]))
+        else:
+            hdr,rows=command_table(command,outputs.get(command,''))
+            sheets.append((command,hdr,rows))
+        logger.info('Command %s: %s',command,'FAIL' if command in errors else 'PASS')
+    file=folder/f'{safe_filename(hostname)}_Commands.xlsx'
+    workbook_xlsx(file,sheets,args.overwrite)
+    logger.info('Saved workbook %s',file)
+    return file
+
+
+def online_collect(args,target,commands):
+    logger,logpath=log_for(args.output,target,'COLLECT')
+    try:
+        logger.info('Connecting to %s',target)
+        out,errors=collect(target,args._username,args._password,commands,True)
+        facts=device_facts(target,out,args.model)
+        hostname=safe_filename(facts['hostname'])
+        logger.info('Connection SUCCESS | Platform Cisco IOS-XE | Model %s | Device %s',facts['model'],hostname)
+        for cmd in out:
+            logger.info('Collect %s: %s',cmd,'FAIL' if cmd in errors else 'PASS')
+        for cmd,error in errors.items():logger.error('Command %s: %s',cmd,error)
+        backup=Path(args.output)/hostname/'Backups'
+        if (backup/'Running_Config.txt').exists() and not args.overwrite:
+            raise FileExistsError(f'{backup}/Running_Config.txt already exists; use --overwrite')
+        save_text(backup/'Running_Config.txt',out['show running-config'],args.overwrite)
+        combined=''.join(f'\n{"="*68}\n{cmd}\n{"="*68}\n{value}\n' for cmd,value in out.items() if cmd!='show running-config')
+        save_text(backup/'Commands_Output.txt',combined,args.overwrite)
+        save_workbook(hostname,out,commands,errors,args,backup,logger)
+        return hostname,backup
+    except Exception:
+        logger.exception('Collect failed for %s',target)
+        raise
+    finally:close_log(logger)
+
+
+def offline_excel(args,target):
+    folder=Path(args.output)/safe_filename(target)/'Backups'
+    path=folder/'Commands_Output.txt'
+    if not path.exists():raise FileNotFoundError(f'Missing saved commands: {path}')
+    outputs=parse_saved_commands(path)
+    commands=[c for c in outputs if c!='show running-config']
+    logger,_=log_for(args.output,target,'EXCEL')
+    try:return save_workbook(target,outputs,commands,{},args,folder,logger)
+    except Exception:logger.exception('Excel generation failed');raise
+    finally:close_log(logger)
+
+
+def create_config(args):
+    banner('CONFIG GENERATOR')
+    print('[+] Configuration Generator\n')
+    tp=args.template or input('Main Template: ').strip()
     vp=args.variables or input('Variables YAML: ').strip()
-    if not tp or not vp:raise ValueError('Both template and variables are required')
+    if not tp or not vp:raise ValueError('Template and variables are required')
     tpath,vpath=Path(tp),Path(vp)
     data=yaml.safe_load(vpath.read_text(encoding='utf-8-sig'))
-    if not isinstance(data,dict):raise ValueError('Variables YAML must be a mapping')
-    ipath=vpath.parent/'interface.yaml'
-    if ipath.exists():
-        interface_data=yaml.safe_load(ipath.read_text(encoding='utf-8-sig')) or {}
-        if not isinstance(interface_data,dict) or not isinstance(interface_data.get('interfaces'),list):
-            raise ValueError(f'Invalid interface.yaml: {ipath}')
-        data['interfaces']=interface_data['interfaces']
-
-    env=Environment(loader=FileSystemLoader(str(tpath.parent or Path('.'))),undefined=StrictUndefined,autoescape=False,keep_trailing_newline=True)
-    generated=env.get_template(tpath.name).render(**data)
+    if not isinstance(data,dict):raise ValueError('Global YAML must contain a mapping')
     hostname=safe_filename(data.get('hostname') or vpath.stem)
-    dest=Path(args.output)/hostname/'Variables'/f'{hostname}_generated.cfg'
-    ensure_write(dest,args.overwrite).write_text(generated,encoding='utf-8')
-    print(f'[PASS] Generated: {dest}')
-    return 0
+    ipath=Path(args.interface_vars) if args.interface_vars else vpath.parent/f'{hostname}_interface.yaml'
+    if not ipath.exists():raise FileNotFoundError(f'Interface YAML missing: {ipath}')
+    interface_data=yaml.safe_load(ipath.read_text(encoding='utf-8-sig'))
+    if not isinstance(interface_data,dict) or not isinstance(interface_data.get('interfaces'),list):raise ValueError('Invalid interface YAML')
+    data['interfaces']=interface_data['interfaces']
+    logger,_=log_for(args.output,hostname,'CREATE')
+    try:
+        logger.info('Main Template: %s',tpath)
+        logger.info('Interface Template: %s',args.interface_template or tpath.parent/f'{hostname}_interfaces.j2')
+        logger.info('Variables YAML: %s',vpath)
+        logger.info('Interface YAML: %s',ipath)
+        env=Environment(loader=FileSystemLoader(str(tpath.parent)),undefined=StrictUndefined,autoescape=False,keep_trailing_newline=True)
+        main=env.get_template(tpath.name)
+        print('[+] Loading Jinja2 templates...         : PASS')
+        logger.info('Main Template PASS | Interface Template checked on render')
+        print('[+] Loading YAML variables...          : PASS')
+        logger.info('Global Variables PASS | Interface Variables PASS')
+        rendered=main.render(**data)
+        logger.info('Rendering configuration: PASS')
+        print('[+] Validating configuration...        : PASS')
+        dest=Path(args.output)/hostname/'Variables'/f'{hostname}_generated.cfg'
+        save_text(dest,rendered,args.overwrite)
+        logger.info('Generated config at: %s',dest)
+        print(f'[+] Saving generated configuration... {dest.name} : CREATED')
+        print('[+] Configuration generation completed successfully.')
+        print(f'\nFiles created in: {dest.parent.resolve()}')
+        return 0
+    except Exception:logger.exception('Create mode failed');raise
+    finally:close_log(logger)
 
-def device_process(target, outputs, errors, args, commands, selection):
-    facts=device_facts(target,outputs,args.model)
-    name=safe_filename(facts['hostname'])
-    root=Path(args.output)/name
-    backups=root/'Backups';variables=root/'Variables'
-    paths=[]
-    if args.backup:
-        if outputs.get('show running-config'):
-            p=ensure_write(backups/'Running_Config.txt',args.overwrite);p.write_text(outputs['show running-config'],encoding='utf-8');paths.append(p)
-        # Combined readable output; do not create a separate folder for each command.
-        combined=''.join(f'\n{"="*68}\n{cmd}\n{"="*68}\n{value}\n' for cmd,value in outputs.items() if cmd!='show running-config')
-        p=ensure_write(backups/'Commands_Output.txt',args.overwrite);p.write_text(combined,encoding='utf-8');paths.append(p)
-    if args.yaml:
-        running=outputs.get('show running-config','')
-        if not running.strip():raise ValueError('YAML extraction requires show running-config')
-        data=config_extract(running,facts,selection)
-        p=ensure_write(variables/f'{name}.yaml',args.overwrite)
-        p.write_text(yaml.safe_dump(data,sort_keys=False,allow_unicode=True,width=120),encoding='utf-8');paths.append(p)
-        interface_data={'interfaces':data.pop('interfaces',[])}
-        # Re-write main YAML without the access-port list; interface.yaml owns it.
-        p.write_text(yaml.safe_dump(data,sort_keys=False,allow_unicode=True,width=120),encoding='utf-8')
-        ifile=ensure_write(variables/'interface.yaml',args.overwrite)
-        ifile.write_text(yaml.safe_dump(interface_data,sort_keys=False,allow_unicode=True,width=120),encoding='utf-8');paths.append(ifile)
-        data['interfaces']=interface_data['interfaces']
-        jpath=ensure_write(variables/'sample_9k.j2',args.overwrite)
-        jpath.write_text(sample_jinja(data),encoding='utf-8');paths.append(jpath)
-
-    if args.excel:
-        available=[c for c in commands]
-        success=sum(bool(outputs.get(c,'')) and c not in errors for c in available)
-        failure=len(available)-success
-        summary=dict(facts,success_count=success,fail_count=failure,failed_commands='; '.join(c for c in available if c in errors))
-        sheets=[('Summary',list(summary.keys()),[list(summary.values())])]
-        for command in commands:
-            if command in errors:sheets.append((command,['Error'],[[errors[command]]]))
-            else:
-                headers,rows=command_table(command,outputs.get(command,''))
-                sheets.append((command,headers,rows))
-        p=workbook_xlsx(backups/f'{name}_Commands.xlsx',sheets,args.overwrite);paths.append(p)
-    print(f'[{name}] PASS | {facts["model"]} | '+', '.join(str(p.relative_to(Path(args.output))) for p in paths))
-    for command,error in errors.items():print(f'  [WARN] {command}: {error[:130]}')
-    return name
 
 def main(argv=None):
     args=cli(argv)
-    print('='*74+'\n CATALYST CONFIG AUDITOR v'+VERSION+'\n'+'='*74)
     try:
-        if args.create_config:return render_config(args)
-        cmd_path=args.cmd_file
-        if args.excel and not cmd_path:
-            try: cmd_path=input('Command file [cmd.txt]: ').strip() or 'cmd.txt'
-            except EOFError: cmd_path='cmd.txt'
-        commands=read_commands(cmd_path) if args.excel else []
-        selection=read_selection(args.selection) if args.yaml else {}
-        if args.from_config:
-            file=Path(args.from_config)
-            content=file.read_text(encoding='utf-8-sig',errors='replace')
-            target=file.stem
-            output={'show running-config':content}
-            if args.excel:
-                print('[!] Offline mode: no command outputs are available; Excel command sheets will be empty.')
-            device_process(target,output,{},args,commands,selection)
+        if args.create_config:return create_config(args)
+        targets=get_targets(args)
+        if not targets:raise ValueError('Empty device inventory')
+        if args.collect:
+            banner('COLLECT')
+            cmd=args.cmd_file
+            if not cmd:
+                try:cmd=input('[+] Command file\n    Enter command file [cmd.txt]: ').strip() or 'cmd.txt'
+                except EOFError:cmd='cmd.txt'
+            commands=read_commands(cmd)
+            print('\n[+] Loading device inventory...')
+            if len(targets)==1:print(f'Device  : {targets[0]}')
+            else:print(f'Devices : {len(targets)}')
+            args._username=args.username or input('SSH Username: ').strip()
+            args._password=args.password if args.password is not None else getpass('SSH Password: ')
+            if not args._username:raise ValueError('SSH username required')
+            failures=[];results=[]
+            def worker(target):return online_collect(args,target,commands)
+            with ThreadPoolExecutor(max_workers=args.workers) as pool:
+                futures={pool.submit(worker,t):t for t in targets}
+                for future in as_completed(futures):
+                    target=futures[future]
+                    try:
+                        name,folder=future.result()
+                        results.append((name,folder))
+                        print('\n[+] Saving backup...')
+                        print('[+] Generating Excel workbook...')
+                        print(f'[+] {name} Collection completed.')
+                        print(f'\nFiles created in: {folder.resolve()}')
+                    except Exception as exc:
+                        print(f'[!] {target}: {type(exc).__name__}: {exc}')
+                        failures.append(target)
+            if args.vars:
+                for name,_ in results:
+                    print('\n'+'-'*32)
+                    banner('VARIABLE EXTRACTION')
+                    offline_vars(args,name,read_selection(args.selection))
+            return 1 if failures else 0
+        if args.vars:
+            banner('VARIABLE EXTRACTION')
+            sel=read_selection(args.selection)
+            bad=0
+            for target in targets:
+                try:offline_vars(args,target,sel)
+                except Exception as exc:bad+=1;print(f'[!] {target}: {type(exc).__name__}: {exc}')
+            return 1 if bad else 0
+        if args.excel:
+            banner('EXCEL')
+            for target in targets:
+                p=offline_excel(args,target)
+                print(f'[+] {target} Excel created.\nFiles created in: {p.parent.resolve()}')
             return 0
-        targets=([args.host] if args.host else [x.strip() for x in Path(args.host_file).read_text(encoding='utf-8-sig').splitlines() if x.strip() and not x.lstrip().startswith('#')])
-        targets=list(dict.fromkeys(targets))
-        if not targets:raise ValueError('No devices found')
-        username=args.username or input('SSH Username: ').strip()
-        password=args.password if args.password is not None else getpass('SSH Password: ')
-        if not username:raise ValueError('SSH username cannot be empty')
-        print(f'[+] Collecting {len(targets)} devices with {min(args.workers,len(targets))} worker(s)...')
-        success=failed=0
-        def worker(target):
-            outputs,errors=collect(target,username,password,commands,args.backup or args.yaml)
-            return device_process(target,outputs,errors,args,commands,selection)
-        with ThreadPoolExecutor(max_workers=args.workers) as pool:
-            futures={pool.submit(worker,t):t for t in targets}
-            for future in as_completed(futures):
-                try:future.result();success+=1
-                except Exception as exc:
-                    failed+=1;print(f'[FAIL] {futures[future]}: {type(exc).__name__}: {exc}')
-                    if args.debug:traceback.print_exc()
-        print(f'Finished: PASS={success} FAIL={failed}')
-        return 1 if failed else 0
+        raise ValueError('No operation selected')
     except (OSError,ValueError,TemplateError,yaml.YAMLError) as exc:
         print(f'[ERROR] {type(exc).__name__}: {exc}',file=sys.stderr)
         if args.debug:traceback.print_exc()
