@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Catalyst Config Auditor v1.2.2 — standalone read-only collector, Excel, YAML and Jinja2 renderer.
+"""Catalyst Config Auditor v1.3.0 — standalone read-only collector, Excel, YAML and Jinja2 renderer.
 
 Dependencies: pip install netmiko pyyaml jinja2
 Excel output is implemented with Python's standard-library ZIP/XML writer (no Excel package).
@@ -23,7 +23,8 @@ from zipfile import ZipFile, ZIP_DEFLATED
 import yaml
 from jinja2 import Environment, FileSystemLoader, StrictUndefined, TemplateError
 
-VERSION = '1.3.0'
+__version__ = '1.3.0'
+VERSION = __version__
 DEFAULT_COMMANDS = ['show version', 'show inventory', 'show switch', 'show interfaces status',
                     'show ip interface brief', 'show ip bgp summary']
 DEFAULT_SELECTION = {
