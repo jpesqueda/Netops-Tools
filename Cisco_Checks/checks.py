@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Cisco IOS-XE PRE/POST command collection tool.
 
-Version: 2.0.0
+Version: 2.1.0
 Python: 3.10+
 Dependencies: netmiko, rich
 
@@ -28,7 +28,7 @@ from netmiko.exceptions import NetmikoAuthenticationException, NetmikoTimeoutExc
 from rich.console import Console
 from rich.progress import BarColumn, Progress, TextColumn, TaskProgressColumn
 
-VERSION = "2.0.0"
+VERSION = "2.1.0"
 DEVICE_TYPE = "cisco_xe"
 DEFAULT_WORKERS = 20
 DEFAULT_COMMAND_FILE = "cmd.txt"
@@ -53,6 +53,8 @@ class DeviceResult:
     reason: str = ""
     file_path: Path | None = None
     command_failures: list[str] = field(default_factory=list)
+    backup_path: Path | None = None
+    backup_error: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -78,6 +80,10 @@ def parse_args() -> argparse.Namespace:
             "    python Cisco_Pre_Post_Checks.py --post -hf hosts.txt -u admin\n\n"
             "  Custom commands and output folder:\n"
             "    python Cisco_Pre_Post_Checks.py --pre -hf hosts.txt -cf cmd.txt -o Upgrade_Cat9k -u admin\n\n"
+            "  Collect running-config backup during PRE:\n"
+            "    python Cisco_Pre_Post_Checks.py --pre -hf hosts.txt -u admin -b\n\n"
+            "  Collect running-config backup during POST:\n"
+            "    python Cisco_Pre_Post_Checks.py --post -h SW01 -u admin --backup\n\n"
             "  Explicit credentials and concurrency:\n"
             "    python Cisco_Pre_Post_Checks.py --post -h SW01 -cf cmd.txt -u admin -p secret -w 20\n\n"
             "  HELP: --help (note: -h means --host, not help)\n"
@@ -95,6 +101,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("-u", "--username", metavar="USER", help="SSH username")
     parser.add_argument("-p", "--password", metavar="PASS", help="SSH password (prefer secure prompt)")
     parser.add_argument("-o", "--output", metavar="FOLDER", help="Output root (default: DD-MMM-YYYY)")
+    parser.add_argument("-b", "--backup", action="store_true",
+                        help="Save show running-config to PRE/POST Backups/ (requires privilege)")
     parser.add_argument("-w", "--workers", metavar="N", type=int, default=DEFAULT_WORKERS,
                         help=f"Concurrent sessions (default: {DEFAULT_WORKERS})")
     parser.add_argument("--help", action="help", help="Display help and examples")
@@ -208,8 +216,8 @@ def validate_output_filenames(hosts: list[str]) -> None:
 
 
 def confirm_overwrite(directory: Path, mode: str) -> bool:
-    # Any existing files in the mode output folder require confirmation.
-    existing = [p for p in directory.iterdir() if p.is_file()] if directory.is_dir() else []
+    # Include backups nested under the selected mode folder when checking for prior results.
+    existing = [p for p in directory.rglob("*") if p.is_file()] if directory.is_dir() else []
     if not existing:
         return True
     console.print(f"\n[yellow][WARNING] Existing {mode.upper()}-CHECK results detected.[/yellow]")
@@ -255,7 +263,8 @@ def command_block(command: str, output: str) -> str:
 # SSH COLLECTION WORKER
 # ---------------------------------------------------------------------------
 def collect_device(target: str, username: str, password: str,
-                   commands: list[str], mode: str, output_dir: Path) -> DeviceResult:
+                   commands: list[str], mode: str, output_dir: Path,
+                   backup: bool = False) -> DeviceResult:
     result = DeviceResult(target=target)
     conn = None
     try:
@@ -283,6 +292,36 @@ def collect_device(target: str, username: str, password: str,
                 result.command_failures.append(f"{command}: {type(exc).__name__}")
                 output = f"[COMMAND ERROR] {type(exc).__name__}: {exc}"
             sections.append(command_block(command, str(output)))
+        if backup:
+            backup_dir = output_dir / "Backups"
+            backup_path = backup_dir / f"{safe_filename(target)}_{mode.upper()}_Running_Config.txt"
+            try:
+                running_config = conn.send_command(
+                    "show running-config", read_timeout=COMMAND_READ_TIMEOUT,
+                    strip_prompt=True, strip_command=True,
+                )
+                if not running_config.strip() or re.search(
+                    r"(?im)^\s*%\s*(?:Invalid input|Incomplete command|Ambiguous command|Error|Authorization failed|Access denied)",
+                    running_config,
+                ):
+                    raise ValueError("Device did not return a valid running configuration")
+                backup_dir.mkdir(parents=True, exist_ok=True)
+                backup_content = (
+                    f"{FILE_HEADER}\nCISCO IOS-XE RUNNING-CONFIG BACKUP\n{FILE_HEADER}\n"
+                    f"TARGET: {target}\nHOSTNAME: {result.hostname}\n"
+                    f"EXECUTION_TYPE: {mode.upper()}\n"
+                    f"TIMESTAMP: {datetime.now().astimezone().isoformat(timespec='seconds')}\n"
+                    f"{FILE_HEADER}\n\n{running_config.rstrip()}\n"
+                )
+                backup_tmp = backup_dir / f".{safe_filename(target)}_{os.getpid()}_{time.monotonic_ns()}.tmp"
+                try:
+                    backup_tmp.write_text(backup_content, encoding="utf-8", errors="replace")
+                    os.replace(backup_tmp, backup_path)
+                finally:
+                    backup_tmp.unlink(missing_ok=True)
+                result.backup_path = backup_path
+            except Exception as exc:
+                result.backup_error = f"{type(exc).__name__}: {str(exc).splitlines()[0][:180]}"
         path = output_dir / f"{safe_filename(target)}_{mode.upper()}.txt"
         content = output_header(target, result.hostname, mode) + "".join(sections)
         # Atomic replacement: never leave a partially written result file.
@@ -293,7 +332,9 @@ def collect_device(target: str, username: str, password: str,
         finally:
             tmp.unlink(missing_ok=True)
         result.file_path = path
-        if result.command_failures:
+        if result.backup_error:
+            result.reason = "Running-config backup failed"
+        elif result.command_failures:
             result.reason = f"{len(result.command_failures)} command(s) failed"
         else:
             result.status = "Success"
@@ -361,6 +402,7 @@ def main() -> int:
     logger.info("Devices        : %d", len(hosts))
     logger.info("Commands File  : %s", cmd_path)
     logger.info("Workers        : %d", args.workers)
+    logger.info("Backup Enabled : %s", "Yes" if args.backup else "No")
     logger.info(FILE_HEADER)
 
     start = time.monotonic()
@@ -375,7 +417,7 @@ def main() -> int:
             task = progress.add_task("checks", total=len(hosts))
             with ThreadPoolExecutor(max_workers=min(args.workers, len(hosts))) as pool:
                 futures = {pool.submit(collect_device, host, username, password,
-                                       commands, mode, output_dir): host for host in hosts}
+                                       commands, mode, output_dir, args.backup): host for host in hosts}
                 for index, future in enumerate(as_completed(futures), start=1):
                     host = futures[future]
                     try:
@@ -387,6 +429,10 @@ def main() -> int:
                                 host, result.status, result.reason)
                     for failure in result.command_failures:
                         logger.info("    COMMAND FAILURE: %s", failure)
+                    if result.backup_path:
+                        logger.info("    BACKUP SAVED: %s", result.backup_path)
+                    if result.backup_error:
+                        logger.info("    BACKUP FAILURE: %s", result.backup_error)
                     progress.advance(task)
     finally:
         password = ""
@@ -413,6 +459,8 @@ def main() -> int:
     console.print(f"Failed            : [{'red' if failed else 'green'}]{failed}[/]")
     console.print(f"Execution Time    : {duration}")
     console.print(f"\nResults : {output_dir}/")
+    if args.backup:
+        console.print(f"Backups : {output_dir / 'Backups'}/")
     console.print(f"Logs    : {log_path.parent}/")
     return 1 if failed else 0
 
