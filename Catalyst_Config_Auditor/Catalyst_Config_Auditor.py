@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Catalyst Config Auditor v1.3.4 — standalone read-only collector, Excel, YAML and Jinja2 renderer.
+"""Catalyst Config Auditor v1.3.5 — standalone read-only collector, Excel, YAML and Jinja2 renderer.
 
 Dependencies: pip install netmiko pyyaml jinja2
 Excel output is implemented with Python's standard-library ZIP/XML writer (no Excel package).
@@ -23,7 +23,7 @@ from zipfile import ZipFile, ZIP_DEFLATED
 import yaml
 from jinja2 import Environment, FileSystemLoader, DictLoader, ChoiceLoader, StrictUndefined, TemplateError
 
-__version__ = '1.3.4'
+__version__ = '1.3.5'
 VERSION = __version__
 DEFAULT_COMMANDS = ['show version', 'show inventory', 'show switch', 'show interfaces status',
                     'show ip interface brief', 'show ip bgp summary']
@@ -35,9 +35,9 @@ DEFAULT_SELECTION = {
   'svis': {'enabled': True, 'include_all': True, 'fields': ['name','description','shutdown','ip_addresses']},
   'loopbacks': {'enabled': True, 'include_all': True},
   'routed_interfaces': {'enabled': True, 'include_all': True},
-  'bgp': {'enabled': True, 'fields': ['asn','router_id','neighbors','address_families'], 'include_passwords': True},
+  'bgp': {'enabled': True, 'fields': ['asn','router_id','neighbors'], 'include_passwords': True},
   'interfaces': {'enabled': True, 'mode': 'access',
-                 'fields': ['name','access_vlan','voice_vlan','description','mode','arp_inspection'],
+                 'fields': ['name','access_vlan','voice_vlan','description','mode','arp_trust'],
                  'arp_inspection': True, 'include_dai_interfaces': True, 'compact': False},
   'ntp': {'enabled': False}, 'tacacs': {'enabled': False}, 'ospf': {'enabled': False}
  }
@@ -76,9 +76,11 @@ MODES:
             only when the corresponding interface include is present.
             Never sends changes to a device.
   -AIO: online collect then offline variable extraction.
-  BGP: neighbor addresses under IPv4/IPv6 address-family are editable YAML variables.
-  DAI: extracts ip arp inspection trust, limit rate/none and burst interval
-       into per-interface YAML, including explicit DAI on trunk interfaces.
+  BGP: one simplified neighbor list; IPv4 activation IPs reference that list.
+  DAI: one boolean arp_trust per port; editable generic interface template
+       emits trust when true and limit rate 150 otherwise (new standard).
+  BGP: one compact neighbor list, with optional ipv4_activate for AF context.
+  IPv4: secondary is emitted only when true; primary IPs have ip and mask only.
   EXCEL: counters and known tables become columns; unknown output uses Line + Raw output.
 LOGS:
   Per-device timestamped detail logs in output/Logs_<hostname>/.
@@ -227,7 +229,9 @@ def parse_ip_lines(lines):
         if match:
             try: ipaddress.IPv4Address(match.group(1));ipaddress.IPv4Address(match.group(2))
             except ValueError:continue
-            values.append({'ip':match.group(1),'mask':match.group(2),'secondary':bool(match.group(3))})
+            entry={'ip':match.group(1),'mask':match.group(2)}
+            if match.group(3): entry['secondary']=True
+            values.append(entry)
     return values
 
 def field_filter(obj,fields):
@@ -306,7 +310,7 @@ def config_extract(config, facts, selection):
         if arp_present:explicit_dai_interfaces.add(name)
         it={'name':name,'description':description,'shutdown':True if 'shutdown' in ch else False if 'no shutdown' in ch else None,
             'ip_addresses':parse_ip_lines(ch),'access_vlan':data,'voice_vlan':voice,'mode':mode,
-            'arp_inspection':arp}
+            'arp_trust':bool(arp['trust'])}
         iface_data.append(it)
     def enabled(key):
         item=selection.get(key,{})
@@ -333,12 +337,14 @@ def config_extract(config, facts, selection):
                         (include_dai and i['name'] in explicit_dai_interfaces)]
         elif mode!='all':raise ValueError("interfaces.mode must be 'access' or 'all'")
         fields=cfg.get('fields',['name','access_vlan','voice_vlan','description'])
-        # Legacy selection files did not know about DAI. Include it by default
-        # unless the user explicitly opts out via arp_inspection: false.
+        # Older selection YAML used 'arp_inspection' for a detailed mapping.
+        # v1.3.5 deliberately exports a single boolean instead.
+        if fields:
+            fields=['arp_trust' if k=='arp_inspection' else k for k in fields]
         if fields and include_arp:
-            fields=list(dict.fromkeys([*fields,'arp_inspection','mode']))
+            fields=list(dict.fromkeys([*fields,'arp_trust','mode']))
         if not include_arp:
-            candidates=[{k:v for k,v in item.items() if k!='arp_inspection'} for item in candidates]
+            candidates=[{k:v for k,v in item.items() if k!='arp_trust'} for item in candidates]
         candidates=[field_filter(i,fields) for i in candidates]
         if cfg.get('compact',False):
             # Only known explicitly configured values are eligible for a common default.
@@ -354,75 +360,53 @@ def config_extract(config, facts, selection):
         cfg=selection['bgp']
         bgp_blocks=[b for b in parsed if re.fullmatch(r'router bgp\s+\d+',b['header'])]
         if not bgp_blocks:
-            bgp={'enabled':False,'asn':None,'router_id':None,'neighbors':[],'address_families':[]}
+            bgp={'enabled':False,'asn':None,'router_id':None,'neighbors':[]}
         else:
             b=bgp_blocks[0]
             asn=int(b['header'].split()[2])
             router_id=None
-            global_neighbors={}
-            address_families=[]
+            peers={}
             active_af=None
-
-            def get_peer(peers, address):
-                return peers.setdefault(address,{
-                    'address':address, 'remote_as':None, 'description':None,
-                    'password_type':None, 'password':None, 'timers':None,
-                    'update_source':None, 'route_map_in':None,
-                    'route_map_out':None, 'send_community':None,
-                    'activate':None, 'next_hop_self':None
-                })
-
             for c in b['children']:
                 if c.startswith('address-family '):
-                    af_name=c[len('address-family '):].strip()
-                    active_af={'name':af_name,'neighbors':[]}
-                    active_af['_by_address']={}
-                    address_families.append(active_af)
+                    active_af=c[len('address-family '):].strip()
                     continue
                 if c in ('exit-address-family','exit-af'):
                     active_af=None
                     continue
                 if active_af is None:
-                    m=re.fullmatch(r'bgp router-id\s+(\S+)',c)
-                    if m:router_id=m.group(1)
+                    rid=re.fullmatch(r'bgp router-id\s+(\S+)',c)
+                    if rid:router_id=rid.group(1)
                 m=re.fullmatch(r'neighbor\s+(\S+)\s+(.+)',c)
                 if not m:continue
-                address, attr=m.groups()
-                peers=global_neighbors if active_af is None else active_af['_by_address']
-                item=get_peer(peers,address)
+                address,attr=m.groups()
+                # One list for the same peer across global and AF statements.
+                peer=peers.setdefault(address,{'address':address})
+                if active_af is None:
+                    peer['_has_global_commands']=True
                 v=re.fullmatch(r'remote-as\s+(\S+)',attr)
-                if v:item['remote_as']=v.group(1)
+                if v:peer['remote_as']=v.group(1)
                 v=re.fullmatch(r'description\s+(.+)',attr)
-                if v:item['description']=v.group(1)
+                if v:peer['description']=v.group(1)
                 v=re.fullmatch(r'password(?:\s+(\d+))?\s+(.+)',attr)
-                if v:
-                    item['password_type']=v.group(1)
-                    if cfg.get('include_passwords',False):item['password']=v.group(2)
+                if v and cfg.get('include_passwords',False):
+                    if v.group(1):peer['password_type']=v.group(1)
+                    peer['password']=v.group(2)
                 v=re.fullmatch(r'timers\s+(\d+)\s+(\d+)',attr)
-                if v:item['timers']={'keepalive':int(v.group(1)),'holdtime':int(v.group(2))}
-                v=re.fullmatch(r'update-source\s+(\S+)',attr)
-                if v:item['update_source']=v.group(1)
-                v=re.fullmatch(r'route-map\s+(\S+)\s+(in|out)',attr)
-                if v:item['route_map_'+v.group(2)]=v.group(1)
-                v=re.fullmatch(r'send-community(?:\s+(\S+))?',attr)
-                if v:item['send_community']=v.group(1) or 'standard'
-                if attr=='activate':item['activate']=True
-                if attr=='no activate':item['activate']=False
-                if attr=='next-hop-self':item['next_hop_self']=True
-            for af in address_families:
-                af['neighbors']=list(af.pop('_by_address').values())
-            if not cfg.get('include_passwords',False):
-                for item in list(global_neighbors.values()) + [peer for af in address_families for peer in af['neighbors']]:
-                    item.pop('password',None)
-            bgp={'enabled':True,'asn':asn,'router_id':router_id,
-                 'neighbors':list(global_neighbors.values()),
-                 'address_families':address_families}
+                if v:peer['timers']={'keepalive':int(v.group(1)),'holdtime':int(v.group(2))}
+                # Only the default IPv4 AF is folded into the compact schema.
+                # VRF / IPv6 AF statements remain in the original main template,
+                # where the neighbor IP is still parameterized via this list.
+                if active_af=='ipv4' and attr in ('activate','no activate'):
+                    peer['ipv4_activate']=(attr=='activate')
+            for peer in peers.values():
+                peer.pop('_has_global_commands',None)
+            bgp={'enabled':True,'asn':asn,'router_id':router_id,'neighbors':list(peers.values())}
         fields=cfg.get('fields',[])
-        # Backward compatibility: older selection files selected neighbors without
-        # address_families. An AF's own neighbors must not disappear silently.
-        if fields and 'neighbors' in fields and 'address_families' not in fields:
-            fields=list(fields)+['address_families']
-        out['bgp']={'enabled':bgp['enabled'],**{k:v for k,v in bgp.items() if k!='enabled' and (not fields or k in fields)}}
+        # Old selection YAML with address_families is accepted, but no longer
+        # duplicates the same IP in nested per-AF neighbor lists.
+        out['bgp']={'enabled':bgp['enabled'],**{k:v for k,v in bgp.items()
+                     if k!='enabled' and (not fields or k in fields)}}
     if enabled('ntp'):
         out['ntp_servers']=[b['header'] for b in parsed if b['header'].startswith('ntp server ')]
     if enabled('tacacs'):
@@ -620,18 +604,18 @@ def sample_jinja(data):
     if 'svis' in data:
         parts+=['{% for svi in svis %}', 'interface {{ svi.name }}',
                 '{% if svi.description %} description {{ svi.description }}{% endif %}',
-                '{% for ip in svi.ip_addresses %} ip address {{ ip.ip }} {{ ip.mask }}{% if ip.secondary %} secondary{% endif %}',
+                '{% for ip in svi.ip_addresses %} ip address {{ ip.ip }} {{ ip.mask }}{% if ip.secondary | default(false) %} secondary{% endif %}',
                 '{% endfor %}', '!', '{% endfor %}']
     if 'loopback_interfaces' in data:
         parts+=['{% for lo in loopback_interfaces %}', 'interface {{ lo.name }}',
-                '{% for ip in lo.ip_addresses %} ip address {{ ip.ip }} {{ ip.mask }}{% if ip.secondary %} secondary{% endif %}',
+                '{% for ip in lo.ip_addresses %} ip address {{ ip.ip }} {{ ip.mask }}{% if ip.secondary | default(false) %} secondary{% endif %}',
                 '{% endfor %}', '!', '{% endfor %}']
     parts+=['! Interface values read from separate var_interfaces.yaml',
             "{% for intf in interfaces %}", 'interface {{ intf.name }}',
             '{% if intf.description %} description {{ intf.description }}{% endif %}',
             ' switchport mode access',
             '{% if intf.access_vlan is not none %} switchport access vlan {{ intf.access_vlan }}{% endif %}',
-            '{% if intf.voice_vlan is not none %} switchport voice vlan {{ intf.voice_vlan }}{% endif %}',
+            '{% if intf.voice_vlan | default(none) is not none %} switchport voice vlan {{ intf.voice_vlan }}{% endif %}',
             '!', '{% endfor %}']
     if data.get('bgp',{}).get('enabled'):
         parts+=['router bgp {{ bgp.asn }}',
@@ -656,14 +640,11 @@ def running_config_jinja(config, data, interface_data):
     vlan_indexes={str(item['id']):idx for idx,item in enumerate(data.get('vlans',[]))}
     bgp=data.get('bgp',{})
     global_neighbors={str(x['address']):idx for idx,x in enumerate(bgp.get('neighbors',[]))}
-    afs=bgp.get('address_families',[])
-    af_lookup={af['name']:idx for idx,af in enumerate(afs)}
-    af_neighbors=[{str(x['address']):idx for idx,x in enumerate(af.get('neighbors',[]))} for af in afs]
-    lines=[];current_iface=None;current_bgp=False;current_vlan=None;ip_index=0;af_index=None
+    lines=[];current_iface=None;current_bgp=False;current_vlan=None;ip_index=0;active_af=None
     for line in config.splitlines(keepends=True):
         core=line.rstrip('\r\n');newline=line[len(core):];stripped=core.strip()
         if core and not core[0].isspace():
-            current_iface=None;current_bgp=False;current_vlan=None;ip_index=0;af_index=None
+            current_iface=None;current_bgp=False;current_vlan=None;ip_index=0;active_af=None
             im=re.fullmatch(r'interface\s+(\S+)',stripped)
             vm=re.fullmatch(r'vlan\s+(\d+)',stripped)
             if im:current_iface=im.group(1)
@@ -682,18 +663,11 @@ def running_config_jinja(config, data, interface_data):
                     replace=f' switchport access vlan {{{{ interfaces[{idx}].access_vlan }}}}'
                 elif re.fullmatch(r'switchport voice vlan\s+\d+',stripped) and item.get('voice_vlan') is not None:
                     replace=f' switchport voice vlan {{{{ interfaces[{idx}].voice_vlan }}}}'
-                elif stripped.lower()=='ip arp inspection trust' and item.get('arp_inspection') is not None:
-                    path=f'interfaces[{idx}].arp_inspection'
-                    replace='{% if '+path+'.trust %}ip arp inspection trust{% endif %}'
-                elif re.fullmatch(r'ip arp inspection limit (?:none|rate\s+\d+(?:\s+burst\s+interval\s+\d+)?)',stripped,re.I) and item.get('arp_inspection') is not None:
-                    path=f'interfaces[{idx}].arp_inspection'
-                    # A single conditional supports switching the YAML between
-                    # a numeric rate and the explicit unlimited configuration.
-                    replace=('{% if '+path+'.limit_none %}ip arp inspection limit none'
-                             '{% elif '+path+'.limit_rate is not none %}ip arp inspection limit rate '
-                             '{{ '+path+'.limit_rate }}'
-                             '{% if '+path+'.burst_interval is not none %} burst interval '
-                             '{{ '+path+'.burst_interval }}{% endif %}{% endif %}')
+                elif re.fullmatch(r'(?:no )?ip arp inspection trust|ip arp inspection limit (?:none|rate\s+\d+(?:\s+burst\s+interval\s+\d+)?)',stripped,re.I) and 'arp_trust' in item:
+                    # Source template follows the simplified v1.3.5 policy.
+                    path=f'interfaces[{idx}].arp_trust'
+                    replace=('{% if '+path+' %}ip arp inspection trust'
+                             '{% else %}ip arp inspection limit rate 150{% endif %}')
             for field in ('svis','loopback_interfaces','routed_interfaces'):
                 idx=sections[field].get(current_iface)
                 if idx is None:continue
@@ -716,22 +690,17 @@ def running_config_jinja(config, data, interface_data):
                 replace='router bgp {{ bgp.asn }}'
             if core and core[0].isspace():
                 if stripped.startswith('address-family '):
-                    af_index=af_lookup.get(stripped[len('address-family '):].strip())
+                    active_af=stripped[len('address-family '):].strip()
                 elif stripped in ('exit-address-family','exit-af'):
-                    af_index=None
+                    active_af=None
                 if stripped.startswith('bgp router-id ') and bgp.get('router_id'):
                     replace=' bgp router-id {{ bgp.router_id }}'
                 m=re.fullmatch(r'neighbor\s+(\S+)\s+(.+)',stripped)
                 if m:
                     address,attr=m.groups()
-                    if af_index is not None:
-                        idx=af_neighbors[af_index].get(address)
-                        entry=afs[af_index]['neighbors'][idx] if idx is not None else None
-                        path=f'bgp.address_families[{af_index}].neighbors[{idx}]' if idx is not None else None
-                    else:
-                        idx=global_neighbors.get(address)
-                        entry=bgp['neighbors'][idx] if idx is not None else None
-                        path=f'bgp.neighbors[{idx}]' if idx is not None else None
+                    idx=global_neighbors.get(address)
+                    entry=bgp['neighbors'][idx] if idx is not None else None
+                    path=f'bgp.neighbors[{idx}]' if idx is not None else None
                     if entry is not None:
                         prefix='neighbor {{ '+path+'.address }} '
                         # Every recognized AF neighbor line gets a variable IP,
@@ -754,8 +723,8 @@ def running_config_jinja(config, data, interface_data):
                             if entry.get('route_map_'+direction):suffix='route-map {{ '+path+'.route_map_'+direction+' }} '+direction
                         elif re.fullmatch(r'send-community(?:\s+\S+)?',attr) and entry.get('send_community'):
                             suffix='send-community'+(' {{ '+path+'.send_community }}' if attr!='send-community' else '')
-                        if af_index is not None and attr=='activate' and entry.get('activate') is not None:
-                            replace='{% if '+path+'.activate %}'+prefix+'activate{% endif %}'
+                        if active_af=='ipv4' and attr=='activate' and entry.get('ipv4_activate') is not None:
+                            replace='{% if '+path+'.ipv4_activate %}'+prefix+'activate{% endif %}'
                         else:
                             replace=prefix+suffix
         if replace is not None:
@@ -826,13 +795,187 @@ def split_template(full, interface_template_name='template_interfaces.j2'):
         if top and re.match(r'^interface\s+(?!Vlan|Loopback|Port-channel|Port-Channel|Null|Tunnel|BDI|MgmtEth)(?:[A-Za-z]+\S*)$',line.strip(),re.I):
             inside=True
             if not inserted:
-                head.append("{% include '"+interface_template_name+"' %}")
+                head.append("{% include '"+interface_template_name+"' %}\n")
                 inserted=True
         elif top and not line.startswith('!'):
             inside=False
         if inside:intfs.append(line)
         else:head.append(line)
     return ''.join(head),''.join(intfs)
+
+
+def generic_interface_template(original_interface_blocks='', interface_data=None):
+    """Editable Jinja baseline: simple VLAN/description + trusted-or-rate150 DAI.
+
+    Access ports are generated from interface YAML, never synthesized from a
+    presumed 24/48-port model. Non-access interfaces require a dedicated
+    approved design and are intentionally NOT converted into access ports.
+    """
+    common="""{# Standard access-port configuration. Edit the commands below to your approved policy. #}
+{% for intf in interfaces %}
+{% if (intf.mode | default('access')) in ('access', none) %}
+interface {{ intf.name }}
+{% if intf.description | default(none) is not none %}
+ description {{ intf.description }}
+{% endif %}
+{% if intf.access_vlan | default(none) is not none %}
+ switchport access vlan {{ intf.access_vlan }}
+{% endif %}
+ switchport mode access
+{% if intf.voice_vlan | default(none) is not none %}
+ switchport voice vlan {{ intf.voice_vlan }}
+{% endif %}
+{% if intf.arp_trust | default(false) %}
+ ip arp inspection trust
+{% else %}
+ ip arp inspection limit rate 150
+{% endif %}
+!
+{% endif %}
+{% endfor %}
+{# Trunk/routed/uplink ports are retained separately from the original backup. #}
+"""
+    # Keep all non-access physical interfaces from the original source verbatim
+    # (or with previously generated per-interface variables). This avoids
+    # accidentally omitting critical trunks/uplinks during a write-erase rebuild.
+    access_names={x['name'] for x in (interface_data or {}).get('interfaces',[])
+                  if x.get('mode') in ('access', None)}
+    original=original_interface_blocks.splitlines(keepends=True)
+    chunks=[];current=[]
+    for line in original:
+        if line.startswith('interface '):
+            if current:chunks.append(current)
+            current=[line]
+        elif current:current.append(line)
+    if current:chunks.append(current)
+    for chunk in chunks:
+        m=re.fullmatch(r'interface\s+(\S+)',chunk[0].strip())
+        if m and m.group(1) not in access_names:
+            common+='\n{# Original non-access port; review before deployment. #}\n'+''.join(chunk)
+    return common
+
+
+def optimize_vlan_template(text, vlans):
+    """Replace simple VLAN stanzas with a single editable Jinja2 for-loop.
+
+    VLAN stanzas containing extra commands are kept as-is. The loop is only
+    generated for stanzas already represented in the selected YAML.
+    """
+    if not vlans:return text
+    ids={str(item['id']):item for item in vlans}
+    lines=text.splitlines(keepends=True)
+    removed=set();start_at=None
+    for pos,line in enumerate(lines):
+        # v1.3.4 only parameterized VLAN names, not the numeric VLAN header.
+        m=re.fullmatch(r'vlan\s+(\d+)\s*',line.strip())
+        if not m or m.group(1) not in ids:continue
+        j=pos+1
+        while j<len(lines) and lines[j] and lines[j][0].isspace():j+=1
+        children=[x.strip() for x in lines[pos+1:j] if x.strip()]
+        allowed={f'name {{{{ vlans[{next((i for i,v in enumerate(vlans) if str(v["id"])==m.group(1)), 0)}].name }}}}'}
+        # If commands other than the optional name are present, don't group.
+        if any(child not in allowed for child in children):return text
+        if start_at is None:start_at=pos
+        removed.update(range(pos,j))
+    if start_at is None:return text
+    newline='\r\n' if '\r\n' in text else '\n'
+    loop=("{% for vlan in vlans %}"+newline+
+          "vlan {{ vlan.id }}"+newline+
+          "{% if vlan.name is not none %}"+newline+
+          " name {{ vlan.name }}"+newline+
+          "{% endif %}"+newline+
+          "!"+newline+
+          "{% endfor %}"+newline)
+    output=[]
+    for pos,line in enumerate(lines):
+        if pos==start_at:output.append(loop)
+        if pos not in removed:output.append(line)
+    return ''.join(output)
+
+
+def optimize_bgp_template(text, bgp):
+    """Use a BGP neighbor loop only for simple global neighbor statements.
+
+    More advanced topologies remain in index-based placeholders; this protects
+    uncommon AF scopes/commands and retains all original CLI lines.
+    """
+    if not bgp.get('enabled') or not bgp.get('neighbors'):return text
+    lines=text.splitlines(keepends=True)
+    in_bgp=False;in_af=False;positions=[];safe=True
+    idx_pattern=re.compile(r'^\s*neighbor\s+\{\{\s*bgp\.neighbors\[(\d+)\]\.address\s*\}\}\s+(.+)$')
+    for i,line in enumerate(lines):
+        stripped=line.strip()
+        if re.fullmatch(r'router bgp \{\{ bgp\.asn \}\}',stripped):in_bgp=True;in_af=False;continue
+        if in_bgp and line and not line[0].isspace():in_bgp=False;in_af=False
+        if not in_bgp:continue
+        if stripped.startswith('address-family '):in_af=True
+        if stripped in ('exit-address-family','exit-af'):in_af=False
+        if in_af:continue
+        m=idx_pattern.fullmatch(stripped)
+        if m:
+            suffix=m.group(2)
+            if (suffix.startswith('remote-as {{') or suffix.startswith('description {{') or
+                suffix.startswith('password ') or suffix.startswith('timers {{')):
+                idx=int(m.group(1))
+                if suffix.startswith('password ') and 'password' not in bgp['neighbors'][idx]:
+                    safe=False  # prevent removal of a source secret when not selected
+                positions.append(i)
+            else:safe=False
+        elif stripped.startswith('neighbor '):safe=False
+    # Do not combine global neighbors when some are configured only in an AF;
+    # generating a global remote-as for them changes routing semantics.
+    if not positions or not safe:return text
+    all_global_addresses=set()
+    for i in positions:
+        m=idx_pattern.fullmatch(lines[i].strip())
+        all_global_addresses.add(int(m.group(1)))
+    if all_global_addresses!=set(range(len(bgp['neighbors']))):return text
+    n='\r\n' if '\r\n' in text else '\n'
+    loop=("{% for neighbor in bgp.neighbors %}"+n+
+          "{% if neighbor.remote_as is defined %} neighbor {{ neighbor.address }} remote-as {{ neighbor.remote_as }}"+n+"{% endif %}"+n+
+          "{% if neighbor.description is defined %} neighbor {{ neighbor.address }} description {{ neighbor.description }}"+n+"{% endif %}"+n+
+          "{% if neighbor.password is defined %} neighbor {{ neighbor.address }} password{% if neighbor.password_type is defined %} {{ neighbor.password_type }}{% endif %} {{ neighbor.password }}"+n+"{% endif %}"+n+
+          "{% if neighbor.timers is defined %} neighbor {{ neighbor.address }} timers {{ neighbor.timers.keepalive }} {{ neighbor.timers.holdtime }}"+n+"{% endif %}"+n+
+          "{% endfor %}"+n)
+    target=min(positions);pos=set(positions)
+    output=[]
+    for i,line in enumerate(lines):
+        if i==target:output.append(loop)
+        if i not in pos:output.append(line)
+    return ''.join(output)
+
+
+def optimize_ipv4_activate(text):
+    """Replace individual default IPv4 AF activation commands with a peer loop.
+
+    Individual AF policies such as route-maps remain untouched and tied to
+    the original neighbor entry. VRF and IPv6 AF blocks are unaffected.
+    """
+    lines=text.splitlines(keepends=True)
+    in_bgp=False;active_af=None;matches=[]
+    for i,line in enumerate(lines):
+        stripped=line.strip()
+        if stripped.startswith('router bgp '):in_bgp=True;active_af=None
+        elif in_bgp and line and not line[0].isspace() and not stripped.startswith(('{%','{#','{{')):in_bgp=False;active_af=None
+        if not in_bgp:continue
+        if stripped.startswith('address-family '):active_af=stripped[len('address-family '):]
+        if stripped in ('exit-address-family','exit-af'):active_af=None
+        if active_af=='ipv4' and re.fullmatch(
+            r'\{% if bgp\.neighbors\[\d+\]\.ipv4_activate %\}neighbor '
+            r'\{\{ bgp\.neighbors\[\d+\]\.address \}\} activate\{% endif %\}',stripped):
+            matches.append(i)
+    if not matches:return text
+    newline='\r\n' if '\r\n' in text else '\n'
+    loop=("{% for neighbor in bgp.neighbors %}"+newline+
+          "{% if neighbor.ipv4_activate | default(false) %}"+newline+
+          "  neighbor {{ neighbor.address }} activate"+newline+
+          "{% endif %}"+newline+
+          "{% endfor %}"+newline)
+    indices=set(matches);output=[]
+    for i,line in enumerate(lines):
+        if i==matches[0]:output.append(loop)
+        if i not in indices:output.append(line)
+    return ''.join(output)
 
 
 def get_targets(args):
@@ -876,15 +1019,12 @@ def offline_vars(args,target,selection):
         logger.info('Descriptions: %d',sum(bool(x.get('description')) for x in interface_data['interfaces']))
         logger.info('Data VLANs: %d',sum(x.get('access_vlan') is not None for x in interface_data['interfaces']))
         logger.info('Voice VLANs: %d',sum(x.get('voice_vlan') is not None for x in interface_data['interfaces']))
-        logger.info('DAI trusted: %d | Rate limited: %d | Unlimited: %d | Custom burst: %d',
-                    sum(bool(x.get('arp_inspection',{}).get('trust')) for x in interface_data['interfaces']),
-                    sum(x.get('arp_inspection',{}).get('limit_rate') is not None for x in interface_data['interfaces']),
-                    sum(bool(x.get('arp_inspection',{}).get('limit_none')) for x in interface_data['interfaces']),
-                    sum(x.get('arp_inspection',{}).get('burst_interval') is not None for x in interface_data['interfaces']))
+        logger.info('DAI trust interfaces: %d | Other interfaces use rate limit 150 in the generic template',
+                    sum(bool(x.get('arp_trust')) for x in interface_data['interfaces']))
         if data.get('bgp',{}).get('enabled'):
-            afs=data['bgp'].get('address_families',[])
-            logger.info('BGP Global Neighbors: %d | Address Families: %d | AF Neighbors: %d',
-                        len(data['bgp'].get('neighbors',[])),len(afs),sum(len(af.get('neighbors',[])) for af in afs))
+            logger.info('BGP neighbors: %d | IPv4 AF activated: %d',
+                        len(data['bgp'].get('neighbors',[])),
+                        sum(bool(x.get('ipv4_activate')) for x in data['bgp'].get('neighbors',[])))
         mainyaml=folder/'var_main.yaml'
         intyaml=folder/'var_interfaces.yaml'
         mainfile=folder/'template_main.j2'
@@ -898,8 +1038,13 @@ def offline_vars(args,target,selection):
         print(f'    {intyaml.name:<22}: CREATED')
         print('\n[+] Generating Jinja2 templates...')
         full=running_config_jinja(running,{**data,'interfaces':interface_data['interfaces']},interface_data)
-        mainj,intsj=split_template(full,intfile.name)
+        mainj,original_interface_blocks=split_template(full,intfile.name)
+        mainj=optimize_vlan_template(mainj,data.get('vlans',[]))
+        mainj=optimize_bgp_template(mainj,data.get('bgp',{}))
+        mainj=optimize_ipv4_activate(mainj)
+        intsj=generic_interface_template(original_interface_blocks,interface_data)
         save_text(mainfile,mainj,args.overwrite);save_text(intfile,intsj,args.overwrite)
+        logger.warning('Generic interfaces Jinja is a NEW CONFIGURATION baseline, not an as-is reproduction: review interface roles and standards.')
         print(f'    {mainfile.name:<22}: CREATED')
         print(f'    {intfile.name:<22}: CREATED')
         env=Environment(loader=FileSystemLoader(str(folder)),undefined=StrictUndefined,autoescape=False,keep_trailing_newline=True)
