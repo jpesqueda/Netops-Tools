@@ -1,0 +1,49 @@
+# Catalyst Config Auditor v1.3.5
+# Select which values --vars extracts from Running_Config.txt.
+# Adjust true/false and fields to match your project.
+extract:
+  hostname: true
+
+  banner:
+    serial_number: true
+    location: true
+    city: false
+
+  vlans:
+    enabled: true
+    ids: []                 # Empty = include all configured VLANs
+
+  svis:
+    enabled: true
+    include_all: true
+    fields: [name, description, shutdown, ip_addresses]
+
+  loopbacks:
+    enabled: true
+    include_all: true
+
+  routed_interfaces:
+    enabled: true
+    include_all: true
+
+  bgp:
+    enabled: true
+    fields: [asn, router_id, neighbors]
+    include_passwords: true  # BGP secrets may be exported. Protect YAML files.
+
+  interfaces:
+    enabled: true
+    mode: access             # access | all
+    fields: [name, description, access_vlan, voice_vlan, mode, arp_trust]
+    arp_inspection: true
+    include_dai_interfaces: true
+    compact: false
+
+  ntp:
+    enabled: false
+
+  tacacs:
+    enabled: false
+
+  ospf:
+    enabled: false
