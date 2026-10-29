@@ -1,0 +1,52 @@
+CISCO SMART PRE / POST DIFF
+==============================================================================
+PRE:  C9300-ACCESS-01_PRE_SIMULATED.txt
+POST: C9300-ACCESS-01_POST_SIMULATED.txt
+EXPECTED IOS-XE: 17.5.6
+------------------------------------------------------------------------------
+[UNSUPPORTED   ] show clock
+[EXPECTED      ] show version
+  EXPECTED ios_xe_version: 17.5.5 -> 17.5.6
+[UNSUPPORTED   ] show inventory
+[UNSUPPORTED   ] show switch
+[UNSUPPORTED   ] show module
+[PASS          ] show environment all
+[UNSUPPORTED   ] show license summary
+[UNSUPPORTED   ] show interfaces
+[UNSUPPORTED   ] show interfaces description
+[UNSUPPORTED   ] show interfaces counters
+[UNSUPPORTED   ] show interfaces counters errors
+[PASS          ] show interface status
+[UNSUPPORTED   ] show interfaces switchport
+[PASS          ] show ip interface brief
+[PASS          ] show vlan brief
+[UNSUPPORTED   ] show spanning-tree summary
+[UNSUPPORTED   ] show spanning-tree root
+[UNSUPPORTED   ] show interfaces trunk
+[UNSUPPORTED   ] show interfaces link
+[UNSUPPORTED   ] show interfaces transceiver detail
+[UNSUPPORTED   ] show mac address-table
+[UNSUPPORTED   ] show mac address-table count
+[UNSUPPORTED   ] show ip arp
+[UNSUPPORTED   ] show ip arp inspection interfaces
+[PASS          ] show ip route
+[UNSUPPORTED   ] show ip route summary
+[UNSUPPORTED   ] show ip protocols
+[PASS          ] show ip bgp summary
+[UNSUPPORTED   ] show cdp neighbors
+[UNSUPPORTED   ] show cdp neighbors detail
+[UNSUPPORTED   ] show lldp neighbors
+[UNSUPPORTED   ] show lldp neighbors detail
+[UNSUPPORTED   ] show etherchannel summary
+[PASS          ] show port-security
+[UNSUPPORTED   ] show power inline
+[UNSUPPORTED   ] show authentication sessions
+[UNSUPPORTED   ] show ip dhcp snooping
+[UNSUPPORTED   ] show ip dhcp snooping binding
+[UNSUPPORTED   ] show device-tracking database
+[UNSUPPORTED   ] show processes cpu sorted
+[UNSUPPORTED   ] show processes memory sorted
+[UNSUPPORTED   ] show logging
+[PASS          ] show running-config
+------------------------------------------------------------------------------
+SUMMARY: EXPECTED=1, PASS=8, UNSUPPORTED=34

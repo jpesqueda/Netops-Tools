@@ -1,0 +1,12 @@
+# Policy documentation for the prototype. Rules are currently implemented in
+# SmartDiff/engine.py. Do not assume edits here change comparison behavior.
+# Production-ready configurable YAML policy is planned for the next iteration.
+comparison:
+  unparsed: UNSUPPORTED
+  missing_command: MISSING_PRE_OR_POST
+  default_parsed_field_change: CHANGE
+version:
+  expected: "17.5.6" # Pass via CLI --expected-version to enforce
+notes:
+  - 'Dynamic fields are excluded by the structured parsers.'
+  - 'Unsupported commands are not classified as PASS.'

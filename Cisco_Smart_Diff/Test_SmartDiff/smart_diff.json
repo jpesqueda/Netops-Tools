@@ -1,0 +1,302 @@
+{
+  "pre": "C9300-ACCESS-01_PRE_SIMULATED.txt",
+  "post": "C9300-ACCESS-01_POST_SIMULATED.txt",
+  "expected_version": "17.5.6",
+  "counts": {
+    "UNSUPPORTED": 34,
+    "EXPECTED": 1,
+    "PASS": 8
+  },
+  "results": [
+    {
+      "command": "show clock",
+      "status": "UNSUPPORTED",
+      "changes": [],
+      "pre_status": "UNSUPPORTED",
+      "post_status": "UNSUPPORTED"
+    },
+    {
+      "command": "show version",
+      "status": "EXPECTED",
+      "changes": [
+        {
+          "field": "ios_xe_version",
+          "pre": "17.5.5",
+          "post": "17.5.6",
+          "severity": "EXPECTED"
+        }
+      ]
+    },
+    {
+      "command": "show inventory",
+      "status": "UNSUPPORTED",
+      "changes": [],
+      "pre_status": "UNSUPPORTED",
+      "post_status": "UNSUPPORTED"
+    },
+    {
+      "command": "show switch",
+      "status": "UNSUPPORTED",
+      "changes": [],
+      "pre_status": "UNSUPPORTED",
+      "post_status": "UNSUPPORTED"
+    },
+    {
+      "command": "show module",
+      "status": "UNSUPPORTED",
+      "changes": [],
+      "pre_status": "UNSUPPORTED",
+      "post_status": "UNSUPPORTED"
+    },
+    {
+      "command": "show environment all",
+      "status": "PASS",
+      "changes": []
+    },
+    {
+      "command": "show license summary",
+      "status": "UNSUPPORTED",
+      "changes": [],
+      "pre_status": "UNSUPPORTED",
+      "post_status": "UNSUPPORTED"
+    },
+    {
+      "command": "show interfaces",
+      "status": "UNSUPPORTED",
+      "changes": [],
+      "pre_status": "UNSUPPORTED",
+      "post_status": "UNSUPPORTED"
+    },
+    {
+      "command": "show interfaces description",
+      "status": "UNSUPPORTED",
+      "changes": [],
+      "pre_status": "UNSUPPORTED",
+      "post_status": "UNSUPPORTED"
+    },
+    {
+      "command": "show interfaces counters",
+      "status": "UNSUPPORTED",
+      "changes": [],
+      "pre_status": "UNSUPPORTED",
+      "post_status": "UNSUPPORTED"
+    },
+    {
+      "command": "show interfaces counters errors",
+      "status": "UNSUPPORTED",
+      "changes": [],
+      "pre_status": "UNSUPPORTED",
+      "post_status": "UNSUPPORTED"
+    },
+    {
+      "command": "show interface status",
+      "status": "PASS",
+      "changes": []
+    },
+    {
+      "command": "show interfaces switchport",
+      "status": "UNSUPPORTED",
+      "changes": [],
+      "pre_status": "UNSUPPORTED",
+      "post_status": "UNSUPPORTED"
+    },
+    {
+      "command": "show ip interface brief",
+      "status": "PASS",
+      "changes": []
+    },
+    {
+      "command": "show vlan brief",
+      "status": "PASS",
+      "changes": []
+    },
+    {
+      "command": "show spanning-tree summary",
+      "status": "UNSUPPORTED",
+      "changes": [],
+      "pre_status": "UNSUPPORTED",
+      "post_status": "UNSUPPORTED"
+    },
+    {
+      "command": "show spanning-tree root",
+      "status": "UNSUPPORTED",
+      "changes": [],
+      "pre_status": "UNSUPPORTED",
+      "post_status": "UNSUPPORTED"
+    },
+    {
+      "command": "show interfaces trunk",
+      "status": "UNSUPPORTED",
+      "changes": [],
+      "pre_status": "UNSUPPORTED",
+      "post_status": "UNSUPPORTED"
+    },
+    {
+      "command": "show interfaces link",
+      "status": "UNSUPPORTED",
+      "changes": [],
+      "pre_status": "UNSUPPORTED",
+      "post_status": "UNSUPPORTED"
+    },
+    {
+      "command": "show interfaces transceiver detail",
+      "status": "UNSUPPORTED",
+      "changes": [],
+      "pre_status": "UNSUPPORTED",
+      "post_status": "UNSUPPORTED"
+    },
+    {
+      "command": "show mac address-table",
+      "status": "UNSUPPORTED",
+      "changes": [],
+      "pre_status": "UNSUPPORTED",
+      "post_status": "UNSUPPORTED"
+    },
+    {
+      "command": "show mac address-table count",
+      "status": "UNSUPPORTED",
+      "changes": [],
+      "pre_status": "UNSUPPORTED",
+      "post_status": "UNSUPPORTED"
+    },
+    {
+      "command": "show ip arp",
+      "status": "UNSUPPORTED",
+      "changes": [],
+      "pre_status": "UNSUPPORTED",
+      "post_status": "UNSUPPORTED"
+    },
+    {
+      "command": "show ip arp inspection interfaces",
+      "status": "UNSUPPORTED",
+      "changes": [],
+      "pre_status": "UNSUPPORTED",
+      "post_status": "UNSUPPORTED"
+    },
+    {
+      "command": "show ip route",
+      "status": "PASS",
+      "changes": []
+    },
+    {
+      "command": "show ip route summary",
+      "status": "UNSUPPORTED",
+      "changes": [],
+      "pre_status": "UNSUPPORTED",
+      "post_status": "UNSUPPORTED"
+    },
+    {
+      "command": "show ip protocols",
+      "status": "UNSUPPORTED",
+      "changes": [],
+      "pre_status": "UNSUPPORTED",
+      "post_status": "UNSUPPORTED"
+    },
+    {
+      "command": "show ip bgp summary",
+      "status": "PASS",
+      "changes": []
+    },
+    {
+      "command": "show cdp neighbors",
+      "status": "UNSUPPORTED",
+      "changes": [],
+      "pre_status": "UNSUPPORTED",
+      "post_status": "UNSUPPORTED"
+    },
+    {
+      "command": "show cdp neighbors detail",
+      "status": "UNSUPPORTED",
+      "changes": [],
+      "pre_status": "UNSUPPORTED",
+      "post_status": "UNSUPPORTED"
+    },
+    {
+      "command": "show lldp neighbors",
+      "status": "UNSUPPORTED",
+      "changes": [],
+      "pre_status": "UNSUPPORTED",
+      "post_status": "UNSUPPORTED"
+    },
+    {
+      "command": "show lldp neighbors detail",
+      "status": "UNSUPPORTED",
+      "changes": [],
+      "pre_status": "UNSUPPORTED",
+      "post_status": "UNSUPPORTED"
+    },
+    {
+      "command": "show etherchannel summary",
+      "status": "UNSUPPORTED",
+      "changes": [],
+      "pre_status": "UNSUPPORTED",
+      "post_status": "UNSUPPORTED"
+    },
+    {
+      "command": "show port-security",
+      "status": "PASS",
+      "changes": []
+    },
+    {
+      "command": "show power inline",
+      "status": "UNSUPPORTED",
+      "changes": [],
+      "pre_status": "UNSUPPORTED",
+      "post_status": "UNSUPPORTED"
+    },
+    {
+      "command": "show authentication sessions",
+      "status": "UNSUPPORTED",
+      "changes": [],
+      "pre_status": "UNSUPPORTED",
+      "post_status": "UNSUPPORTED"
+    },
+    {
+      "command": "show ip dhcp snooping",
+      "status": "UNSUPPORTED",
+      "changes": [],
+      "pre_status": "UNSUPPORTED",
+      "post_status": "UNSUPPORTED"
+    },
+    {
+      "command": "show ip dhcp snooping binding",
+      "status": "UNSUPPORTED",
+      "changes": [],
+      "pre_status": "UNSUPPORTED",
+      "post_status": "UNSUPPORTED"
+    },
+    {
+      "command": "show device-tracking database",
+      "status": "UNSUPPORTED",
+      "changes": [],
+      "pre_status": "UNSUPPORTED",
+      "post_status": "UNSUPPORTED"
+    },
+    {
+      "command": "show processes cpu sorted",
+      "status": "UNSUPPORTED",
+      "changes": [],
+      "pre_status": "UNSUPPORTED",
+      "post_status": "UNSUPPORTED"
+    },
+    {
+      "command": "show processes memory sorted",
+      "status": "UNSUPPORTED",
+      "changes": [],
+      "pre_status": "UNSUPPORTED",
+      "post_status": "UNSUPPORTED"
+    },
+    {
+      "command": "show logging",
+      "status": "UNSUPPORTED",
+      "changes": [],
+      "pre_status": "UNSUPPORTED",
+      "post_status": "UNSUPPORTED"
+    },
+    {
+      "command": "show running-config",
+      "status": "PASS",
+      "changes": []
+    }
+  ]
+}

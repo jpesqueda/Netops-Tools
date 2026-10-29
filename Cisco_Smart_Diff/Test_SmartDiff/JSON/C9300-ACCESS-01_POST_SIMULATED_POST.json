@@ -1,0 +1,2062 @@
+{
+  "source": "C9300-ACCESS-01_POST_SIMULATED.txt",
+  "command_count": 43,
+  "commands": {
+    "show clock": {
+      "status": "UNSUPPORTED",
+      "raw_lines": 2
+    },
+    "show version": {
+      "status": "PARSED",
+      "data": {
+        "ios_xe_version": "17.5.6"
+      }
+    },
+    "show inventory": {
+      "status": "UNSUPPORTED",
+      "raw_lines": 14
+    },
+    "show switch": {
+      "status": "UNSUPPORTED",
+      "raw_lines": 5
+    },
+    "show module": {
+      "status": "UNSUPPORTED",
+      "raw_lines": 4
+    },
+    "show environment all": {
+      "status": "PARSED",
+      "data": {
+        "components": {
+          "switch 1 fan 1": "OK",
+          "switch 1 fan 2": "OK",
+          "switch 1 fan 3": "OK",
+          "switch 1: system temperature": "OK",
+          "switch 1 power supply a": "OK",
+          "switch 1 power supply b": "OK"
+        }
+      }
+    },
+    "show license summary": {
+      "status": "UNSUPPORTED",
+      "raw_lines": 9
+    },
+    "show interfaces": {
+      "status": "UNSUPPORTED",
+      "raw_lines": 619
+    },
+    "show interfaces description": {
+      "status": "UNSUPPORTED",
+      "raw_lines": 57
+    },
+    "show interfaces counters": {
+      "status": "UNSUPPORTED",
+      "raw_lines": 50
+    },
+    "show interfaces counters errors": {
+      "status": "UNSUPPORTED",
+      "raw_lines": 50
+    },
+    "show interface status": {
+      "status": "PARSED",
+      "data": {
+        "interfaces": {
+          "Gi1/0/1": {
+            "description": "USER_01",
+            "status": "connected",
+            "vlan": "20"
+          },
+          "Gi1/0/2": {
+            "description": "USER_02",
+            "status": "connected",
+            "vlan": "20"
+          },
+          "Gi1/0/3": {
+            "description": "USER_03",
+            "status": "connected",
+            "vlan": "20"
+          },
+          "Gi1/0/4": {
+            "description": "USER_04",
+            "status": "connected",
+            "vlan": "20"
+          },
+          "Gi1/0/5": {
+            "description": "USER_05",
+            "status": "connected",
+            "vlan": "20"
+          },
+          "Gi1/0/6": {
+            "description": "USER_06",
+            "status": "connected",
+            "vlan": "20"
+          },
+          "Gi1/0/7": {
+            "description": "USER_07",
+            "status": "connected",
+            "vlan": "20"
+          },
+          "Gi1/0/8": {
+            "description": "USER_08",
+            "status": "connected",
+            "vlan": "20"
+          },
+          "Gi1/0/9": {
+            "description": "USER_09",
+            "status": "connected",
+            "vlan": "20"
+          },
+          "Gi1/0/10": {
+            "description": "USER_10",
+            "status": "connected",
+            "vlan": "20"
+          },
+          "Gi1/0/11": {
+            "description": "USER_11",
+            "status": "connected",
+            "vlan": "20"
+          },
+          "Gi1/0/12": {
+            "description": "USER_12",
+            "status": "connected",
+            "vlan": "20"
+          },
+          "Gi1/0/13": {
+            "description": "USER_13",
+            "status": "connected",
+            "vlan": "20"
+          },
+          "Gi1/0/14": {
+            "description": "USER_14",
+            "status": "connected",
+            "vlan": "20"
+          },
+          "Gi1/0/15": {
+            "description": "USER_15",
+            "status": "connected",
+            "vlan": "20"
+          },
+          "Gi1/0/16": {
+            "description": "USER_16",
+            "status": "connected",
+            "vlan": "20"
+          },
+          "Gi1/0/17": {
+            "description": "PHONE_17",
+            "status": "connected",
+            "vlan": "30"
+          },
+          "Gi1/0/18": {
+            "description": "PHONE_18",
+            "status": "connected",
+            "vlan": "30"
+          },
+          "Gi1/0/19": {
+            "description": "PHONE_19",
+            "status": "connected",
+            "vlan": "30"
+          },
+          "Gi1/0/20": {
+            "description": "PHONE_20",
+            "status": "connected",
+            "vlan": "30"
+          },
+          "Gi1/0/21": {
+            "description": "PHONE_21",
+            "status": "connected",
+            "vlan": "30"
+          },
+          "Gi1/0/22": {
+            "description": "PHONE_22",
+            "status": "connected",
+            "vlan": "30"
+          },
+          "Gi1/0/23": {
+            "description": "PHONE_23",
+            "status": "connected",
+            "vlan": "30"
+          },
+          "Gi1/0/24": {
+            "description": "PHONE_24",
+            "status": "connected",
+            "vlan": "30"
+          },
+          "Gi1/0/25": {
+            "description": "PHONE_25",
+            "status": "connected",
+            "vlan": "30"
+          },
+          "Gi1/0/26": {
+            "description": "PHONE_26",
+            "status": "connected",
+            "vlan": "30"
+          },
+          "Gi1/0/27": {
+            "description": "PHONE_27",
+            "status": "connected",
+            "vlan": "30"
+          },
+          "Gi1/0/28": {
+            "description": "PHONE_28",
+            "status": "connected",
+            "vlan": "30"
+          },
+          "Gi1/0/29": {
+            "description": "PHONE_29",
+            "status": "connected",
+            "vlan": "30"
+          },
+          "Gi1/0/30": {
+            "description": "PHONE_30",
+            "status": "connected",
+            "vlan": "30"
+          },
+          "Gi1/0/31": {
+            "description": "PHONE_31",
+            "status": "connected",
+            "vlan": "30"
+          },
+          "Gi1/0/32": {
+            "description": "PHONE_32",
+            "status": "connected",
+            "vlan": "30"
+          },
+          "Gi1/0/33": {
+            "description": "MGMT_DEVICE_33",
+            "status": "connected",
+            "vlan": "10"
+          },
+          "Gi1/0/34": {
+            "description": "MGMT_DEVICE_34",
+            "status": "connected",
+            "vlan": "10"
+          },
+          "Gi1/0/35": {
+            "description": "MGMT_DEVICE_35",
+            "status": "connected",
+            "vlan": "10"
+          },
+          "Gi1/0/36": {
+            "description": "MGMT_DEVICE_36",
+            "status": "connected",
+            "vlan": "10"
+          },
+          "Gi1/0/37": {
+            "description": "MGMT_DEVICE_37",
+            "status": "connected",
+            "vlan": "10"
+          },
+          "Gi1/0/38": {
+            "description": "MGMT_DEVICE_38",
+            "status": "connected",
+            "vlan": "10"
+          },
+          "Gi1/0/39": {
+            "description": "MGMT_DEVICE_39",
+            "status": "connected",
+            "vlan": "10"
+          },
+          "Gi1/0/40": {
+            "description": "MGMT_DEVICE_40",
+            "status": "connected",
+            "vlan": "10"
+          },
+          "Gi1/0/41": {
+            "description": "MGMT_DEVICE_41",
+            "status": "connected",
+            "vlan": "10"
+          },
+          "Gi1/0/42": {
+            "description": "MGMT_DEVICE_42",
+            "status": "connected",
+            "vlan": "10"
+          },
+          "Gi1/0/43": {
+            "description": "MGMT_DEVICE_43",
+            "status": "connected",
+            "vlan": "10"
+          },
+          "Gi1/0/44": {
+            "description": "MGMT_DEVICE_44",
+            "status": "connected",
+            "vlan": "10"
+          },
+          "Gi1/0/45": {
+            "description": "MGMT_DEVICE_45",
+            "status": "connected",
+            "vlan": "10"
+          },
+          "Gi1/0/46": {
+            "description": "MGMT_DEVICE_46",
+            "status": "connected",
+            "vlan": "10"
+          },
+          "Gi1/0/47": {
+            "description": "MGMT_DEVICE_47",
+            "status": "connected",
+            "vlan": "10"
+          },
+          "Gi1/0/48": {
+            "description": "MGMT_DEVICE_48",
+            "status": "connected",
+            "vlan": "10"
+          },
+          "Te1/1/1": {
+            "description": "ROUTED_UPLINK_TO_CORE",
+            "status": "connected",
+            "vlan": "routed"
+          },
+          "Te1/1/2": {
+            "description": "SPARE_UPLINK",
+            "status": "disabled",
+            "vlan": "1"
+          },
+          "Te1/1/3": {
+            "description": "UNUSED",
+            "status": "disabled",
+            "vlan": "1"
+          },
+          "Te1/1/4": {
+            "description": "UNUSED",
+            "status": "disabled",
+            "vlan": "1"
+          }
+        }
+      }
+    },
+    "show interfaces switchport": {
+      "status": "UNSUPPORTED",
+      "raw_lines": 434
+    },
+    "show ip interface brief": {
+      "status": "PARSED",
+      "data": {
+        "interfaces": {
+          "GigabitEthernet1/0/1": {
+            "ip": "unassigned",
+            "admin_oper": "up",
+            "protocol": "up"
+          },
+          "GigabitEthernet1/0/2": {
+            "ip": "unassigned",
+            "admin_oper": "up",
+            "protocol": "up"
+          },
+          "GigabitEthernet1/0/3": {
+            "ip": "unassigned",
+            "admin_oper": "up",
+            "protocol": "up"
+          },
+          "GigabitEthernet1/0/4": {
+            "ip": "unassigned",
+            "admin_oper": "up",
+            "protocol": "up"
+          },
+          "GigabitEthernet1/0/5": {
+            "ip": "unassigned",
+            "admin_oper": "up",
+            "protocol": "up"
+          },
+          "GigabitEthernet1/0/6": {
+            "ip": "unassigned",
+            "admin_oper": "up",
+            "protocol": "up"
+          },
+          "GigabitEthernet1/0/7": {
+            "ip": "unassigned",
+            "admin_oper": "up",
+            "protocol": "up"
+          },
+          "GigabitEthernet1/0/8": {
+            "ip": "unassigned",
+            "admin_oper": "up",
+            "protocol": "up"
+          },
+          "GigabitEthernet1/0/9": {
+            "ip": "unassigned",
+            "admin_oper": "up",
+            "protocol": "up"
+          },
+          "GigabitEthernet1/0/10": {
+            "ip": "unassigned",
+            "admin_oper": "up",
+            "protocol": "up"
+          },
+          "GigabitEthernet1/0/11": {
+            "ip": "unassigned",
+            "admin_oper": "up",
+            "protocol": "up"
+          },
+          "GigabitEthernet1/0/12": {
+            "ip": "unassigned",
+            "admin_oper": "up",
+            "protocol": "up"
+          },
+          "GigabitEthernet1/0/13": {
+            "ip": "unassigned",
+            "admin_oper": "up",
+            "protocol": "up"
+          },
+          "GigabitEthernet1/0/14": {
+            "ip": "unassigned",
+            "admin_oper": "up",
+            "protocol": "up"
+          },
+          "GigabitEthernet1/0/15": {
+            "ip": "unassigned",
+            "admin_oper": "up",
+            "protocol": "up"
+          },
+          "GigabitEthernet1/0/16": {
+            "ip": "unassigned",
+            "admin_oper": "up",
+            "protocol": "up"
+          },
+          "GigabitEthernet1/0/17": {
+            "ip": "unassigned",
+            "admin_oper": "up",
+            "protocol": "up"
+          },
+          "GigabitEthernet1/0/18": {
+            "ip": "unassigned",
+            "admin_oper": "up",
+            "protocol": "up"
+          },
+          "GigabitEthernet1/0/19": {
+            "ip": "unassigned",
+            "admin_oper": "up",
+            "protocol": "up"
+          },
+          "GigabitEthernet1/0/20": {
+            "ip": "unassigned",
+            "admin_oper": "up",
+            "protocol": "up"
+          },
+          "GigabitEthernet1/0/21": {
+            "ip": "unassigned",
+            "admin_oper": "up",
+            "protocol": "up"
+          },
+          "GigabitEthernet1/0/22": {
+            "ip": "unassigned",
+            "admin_oper": "up",
+            "protocol": "up"
+          },
+          "GigabitEthernet1/0/23": {
+            "ip": "unassigned",
+            "admin_oper": "up",
+            "protocol": "up"
+          },
+          "GigabitEthernet1/0/24": {
+            "ip": "unassigned",
+            "admin_oper": "up",
+            "protocol": "up"
+          },
+          "GigabitEthernet1/0/25": {
+            "ip": "unassigned",
+            "admin_oper": "up",
+            "protocol": "up"
+          },
+          "GigabitEthernet1/0/26": {
+            "ip": "unassigned",
+            "admin_oper": "up",
+            "protocol": "up"
+          },
+          "GigabitEthernet1/0/27": {
+            "ip": "unassigned",
+            "admin_oper": "up",
+            "protocol": "up"
+          },
+          "GigabitEthernet1/0/28": {
+            "ip": "unassigned",
+            "admin_oper": "up",
+            "protocol": "up"
+          },
+          "GigabitEthernet1/0/29": {
+            "ip": "unassigned",
+            "admin_oper": "up",
+            "protocol": "up"
+          },
+          "GigabitEthernet1/0/30": {
+            "ip": "unassigned",
+            "admin_oper": "up",
+            "protocol": "up"
+          },
+          "GigabitEthernet1/0/31": {
+            "ip": "unassigned",
+            "admin_oper": "up",
+            "protocol": "up"
+          },
+          "GigabitEthernet1/0/32": {
+            "ip": "unassigned",
+            "admin_oper": "up",
+            "protocol": "up"
+          },
+          "GigabitEthernet1/0/33": {
+            "ip": "unassigned",
+            "admin_oper": "up",
+            "protocol": "up"
+          },
+          "GigabitEthernet1/0/34": {
+            "ip": "unassigned",
+            "admin_oper": "up",
+            "protocol": "up"
+          },
+          "GigabitEthernet1/0/35": {
+            "ip": "unassigned",
+            "admin_oper": "up",
+            "protocol": "up"
+          },
+          "GigabitEthernet1/0/36": {
+            "ip": "unassigned",
+            "admin_oper": "up",
+            "protocol": "up"
+          },
+          "GigabitEthernet1/0/37": {
+            "ip": "unassigned",
+            "admin_oper": "up",
+            "protocol": "up"
+          },
+          "GigabitEthernet1/0/38": {
+            "ip": "unassigned",
+            "admin_oper": "up",
+            "protocol": "up"
+          },
+          "GigabitEthernet1/0/39": {
+            "ip": "unassigned",
+            "admin_oper": "up",
+            "protocol": "up"
+          },
+          "GigabitEthernet1/0/40": {
+            "ip": "unassigned",
+            "admin_oper": "up",
+            "protocol": "up"
+          },
+          "GigabitEthernet1/0/41": {
+            "ip": "unassigned",
+            "admin_oper": "up",
+            "protocol": "up"
+          },
+          "GigabitEthernet1/0/42": {
+            "ip": "unassigned",
+            "admin_oper": "up",
+            "protocol": "up"
+          },
+          "GigabitEthernet1/0/43": {
+            "ip": "unassigned",
+            "admin_oper": "up",
+            "protocol": "up"
+          },
+          "GigabitEthernet1/0/44": {
+            "ip": "unassigned",
+            "admin_oper": "up",
+            "protocol": "up"
+          },
+          "GigabitEthernet1/0/45": {
+            "ip": "unassigned",
+            "admin_oper": "up",
+            "protocol": "up"
+          },
+          "GigabitEthernet1/0/46": {
+            "ip": "unassigned",
+            "admin_oper": "up",
+            "protocol": "up"
+          },
+          "GigabitEthernet1/0/47": {
+            "ip": "unassigned",
+            "admin_oper": "up",
+            "protocol": "up"
+          },
+          "GigabitEthernet1/0/48": {
+            "ip": "unassigned",
+            "admin_oper": "up",
+            "protocol": "up"
+          },
+          "TenGigabitEthernet1/1/1": {
+            "ip": "10.255.0.2",
+            "admin_oper": "up",
+            "protocol": "up"
+          },
+          "TenGigabitEthernet1/1/2": {
+            "ip": "unassigned",
+            "admin_oper": "administratively down",
+            "protocol": "down"
+          },
+          "TenGigabitEthernet1/1/3": {
+            "ip": "unassigned",
+            "admin_oper": "administratively down",
+            "protocol": "down"
+          },
+          "TenGigabitEthernet1/1/4": {
+            "ip": "unassigned",
+            "admin_oper": "administratively down",
+            "protocol": "down"
+          },
+          "Vlan10": {
+            "ip": "192.0.2.2",
+            "admin_oper": "up",
+            "protocol": "up"
+          },
+          "Vlan20": {
+            "ip": "198.51.100.1",
+            "admin_oper": "up",
+            "protocol": "up"
+          },
+          "Vlan30": {
+            "ip": "203.0.113.1",
+            "admin_oper": "up",
+            "protocol": "up"
+          },
+          "Loopback0": {
+            "ip": "10.255.255.10",
+            "admin_oper": "up",
+            "protocol": "up"
+          }
+        }
+      }
+    },
+    "show vlan brief": {
+      "status": "PARSED",
+      "data": {
+        "vlans": {
+          "1": {
+            "name": "default",
+            "state": "active"
+          },
+          "10": {
+            "name": "MGMT",
+            "state": "active"
+          },
+          "20": {
+            "name": "USERS",
+            "state": "active"
+          },
+          "30": {
+            "name": "VOICE",
+            "state": "active"
+          }
+        }
+      }
+    },
+    "show spanning-tree summary": {
+      "status": "UNSUPPORTED",
+      "raw_lines": 14
+    },
+    "show spanning-tree root": {
+      "status": "UNSUPPORTED",
+      "raw_lines": 6
+    },
+    "show interfaces trunk": {
+      "status": "UNSUPPORTED",
+      "raw_lines": 9
+    },
+    "show interfaces link": {
+      "status": "UNSUPPORTED",
+      "raw_lines": 50
+    },
+    "show interfaces transceiver detail": {
+      "status": "UNSUPPORTED",
+      "raw_lines": 10
+    },
+    "show mac address-table": {
+      "status": "UNSUPPORTED",
+      "raw_lines": 54
+    },
+    "show mac address-table count": {
+      "status": "UNSUPPORTED",
+      "raw_lines": 7
+    },
+    "show ip arp": {
+      "status": "UNSUPPORTED",
+      "raw_lines": 50
+    },
+    "show ip arp inspection interfaces": {
+      "status": "UNSUPPORTED",
+      "raw_lines": 6
+    },
+    "show ip route": {
+      "status": "PARSED",
+      "data": {
+        "routes": {
+          "0.0.0.0/0": {
+            "source": "B*",
+            "next_hop": "10.255.0.1",
+            "interface": null
+          },
+          "10.255.0.0/30": {
+            "source": "C",
+            "next_hop": null,
+            "interface": "TenGigabitEthernet1/1/1"
+          },
+          "10.255.0.2/32": {
+            "source": "L",
+            "next_hop": null,
+            "interface": "TenGigabitEthernet1/1/1"
+          },
+          "10.255.255.10/32": {
+            "source": "C",
+            "next_hop": null,
+            "interface": "Loopback0"
+          },
+          "192.0.2.0/24": {
+            "source": "C",
+            "next_hop": null,
+            "interface": "Vlan10"
+          },
+          "192.0.2.2/32": {
+            "source": "L",
+            "next_hop": null,
+            "interface": "Vlan10"
+          },
+          "198.51.100.0/24": {
+            "source": "C",
+            "next_hop": null,
+            "interface": "Vlan20"
+          },
+          "198.51.100.1/32": {
+            "source": "L",
+            "next_hop": null,
+            "interface": "Vlan20"
+          },
+          "203.0.113.0/24": {
+            "source": "C",
+            "next_hop": null,
+            "interface": "Vlan30"
+          },
+          "203.0.113.1/32": {
+            "source": "L",
+            "next_hop": null,
+            "interface": "Vlan30"
+          }
+        }
+      }
+    },
+    "show ip route summary": {
+      "status": "UNSUPPORTED",
+      "raw_lines": 7
+    },
+    "show ip protocols": {
+      "status": "UNSUPPORTED",
+      "raw_lines": 7
+    },
+    "show ip bgp summary": {
+      "status": "PARSED",
+      "data": {
+        "local_as": 65010,
+        "neighbors": {
+          "10.255.0.1": {
+            "remote_as": 65000,
+            "state": "Established",
+            "prefixes_received": 1
+          }
+        }
+      }
+    },
+    "show cdp neighbors": {
+      "status": "UNSUPPORTED",
+      "raw_lines": 4
+    },
+    "show cdp neighbors detail": {
+      "status": "UNSUPPORTED",
+      "raw_lines": 9
+    },
+    "show lldp neighbors": {
+      "status": "UNSUPPORTED",
+      "raw_lines": 3
+    },
+    "show lldp neighbors detail": {
+      "status": "UNSUPPORTED",
+      "raw_lines": 2
+    },
+    "show etherchannel summary": {
+      "status": "UNSUPPORTED",
+      "raw_lines": 7
+    },
+    "show port-security": {
+      "status": "PARSED",
+      "data": {
+        "ports": {
+          "Gi1/0/1": {
+            "maximum": 2,
+            "current": 1,
+            "violations": 0,
+            "action": "restrict"
+          },
+          "Gi1/0/2": {
+            "maximum": 2,
+            "current": 1,
+            "violations": 0,
+            "action": "restrict"
+          },
+          "Gi1/0/3": {
+            "maximum": 2,
+            "current": 1,
+            "violations": 0,
+            "action": "restrict"
+          },
+          "Gi1/0/4": {
+            "maximum": 2,
+            "current": 1,
+            "violations": 0,
+            "action": "restrict"
+          },
+          "Gi1/0/5": {
+            "maximum": 2,
+            "current": 1,
+            "violations": 0,
+            "action": "restrict"
+          },
+          "Gi1/0/6": {
+            "maximum": 2,
+            "current": 1,
+            "violations": 0,
+            "action": "restrict"
+          },
+          "Gi1/0/7": {
+            "maximum": 2,
+            "current": 1,
+            "violations": 0,
+            "action": "restrict"
+          },
+          "Gi1/0/8": {
+            "maximum": 2,
+            "current": 1,
+            "violations": 0,
+            "action": "restrict"
+          },
+          "Gi1/0/9": {
+            "maximum": 2,
+            "current": 1,
+            "violations": 0,
+            "action": "restrict"
+          },
+          "Gi1/0/10": {
+            "maximum": 2,
+            "current": 1,
+            "violations": 0,
+            "action": "restrict"
+          },
+          "Gi1/0/11": {
+            "maximum": 2,
+            "current": 1,
+            "violations": 0,
+            "action": "restrict"
+          },
+          "Gi1/0/12": {
+            "maximum": 2,
+            "current": 1,
+            "violations": 0,
+            "action": "restrict"
+          },
+          "Gi1/0/13": {
+            "maximum": 2,
+            "current": 1,
+            "violations": 0,
+            "action": "restrict"
+          },
+          "Gi1/0/14": {
+            "maximum": 2,
+            "current": 1,
+            "violations": 0,
+            "action": "restrict"
+          },
+          "Gi1/0/15": {
+            "maximum": 2,
+            "current": 1,
+            "violations": 0,
+            "action": "restrict"
+          },
+          "Gi1/0/16": {
+            "maximum": 2,
+            "current": 1,
+            "violations": 0,
+            "action": "restrict"
+          },
+          "Gi1/0/17": {
+            "maximum": 2,
+            "current": 1,
+            "violations": 0,
+            "action": "restrict"
+          },
+          "Gi1/0/18": {
+            "maximum": 2,
+            "current": 1,
+            "violations": 0,
+            "action": "restrict"
+          },
+          "Gi1/0/19": {
+            "maximum": 2,
+            "current": 1,
+            "violations": 0,
+            "action": "restrict"
+          },
+          "Gi1/0/20": {
+            "maximum": 2,
+            "current": 1,
+            "violations": 0,
+            "action": "restrict"
+          },
+          "Gi1/0/21": {
+            "maximum": 2,
+            "current": 1,
+            "violations": 0,
+            "action": "restrict"
+          },
+          "Gi1/0/22": {
+            "maximum": 2,
+            "current": 1,
+            "violations": 0,
+            "action": "restrict"
+          },
+          "Gi1/0/23": {
+            "maximum": 2,
+            "current": 1,
+            "violations": 0,
+            "action": "restrict"
+          },
+          "Gi1/0/24": {
+            "maximum": 2,
+            "current": 1,
+            "violations": 0,
+            "action": "restrict"
+          },
+          "Gi1/0/25": {
+            "maximum": 2,
+            "current": 1,
+            "violations": 0,
+            "action": "restrict"
+          },
+          "Gi1/0/26": {
+            "maximum": 2,
+            "current": 1,
+            "violations": 0,
+            "action": "restrict"
+          },
+          "Gi1/0/27": {
+            "maximum": 2,
+            "current": 1,
+            "violations": 0,
+            "action": "restrict"
+          },
+          "Gi1/0/28": {
+            "maximum": 2,
+            "current": 1,
+            "violations": 0,
+            "action": "restrict"
+          },
+          "Gi1/0/29": {
+            "maximum": 2,
+            "current": 1,
+            "violations": 0,
+            "action": "restrict"
+          },
+          "Gi1/0/30": {
+            "maximum": 2,
+            "current": 1,
+            "violations": 0,
+            "action": "restrict"
+          },
+          "Gi1/0/31": {
+            "maximum": 2,
+            "current": 1,
+            "violations": 0,
+            "action": "restrict"
+          },
+          "Gi1/0/32": {
+            "maximum": 2,
+            "current": 1,
+            "violations": 0,
+            "action": "restrict"
+          },
+          "Gi1/0/33": {
+            "maximum": 2,
+            "current": 1,
+            "violations": 0,
+            "action": "restrict"
+          },
+          "Gi1/0/34": {
+            "maximum": 2,
+            "current": 1,
+            "violations": 0,
+            "action": "restrict"
+          },
+          "Gi1/0/35": {
+            "maximum": 2,
+            "current": 1,
+            "violations": 0,
+            "action": "restrict"
+          },
+          "Gi1/0/36": {
+            "maximum": 2,
+            "current": 1,
+            "violations": 0,
+            "action": "restrict"
+          },
+          "Gi1/0/37": {
+            "maximum": 2,
+            "current": 1,
+            "violations": 0,
+            "action": "restrict"
+          },
+          "Gi1/0/38": {
+            "maximum": 2,
+            "current": 1,
+            "violations": 0,
+            "action": "restrict"
+          },
+          "Gi1/0/39": {
+            "maximum": 2,
+            "current": 1,
+            "violations": 0,
+            "action": "restrict"
+          },
+          "Gi1/0/40": {
+            "maximum": 2,
+            "current": 1,
+            "violations": 0,
+            "action": "restrict"
+          },
+          "Gi1/0/41": {
+            "maximum": 2,
+            "current": 1,
+            "violations": 0,
+            "action": "restrict"
+          },
+          "Gi1/0/42": {
+            "maximum": 2,
+            "current": 1,
+            "violations": 0,
+            "action": "restrict"
+          },
+          "Gi1/0/43": {
+            "maximum": 2,
+            "current": 1,
+            "violations": 0,
+            "action": "restrict"
+          },
+          "Gi1/0/44": {
+            "maximum": 2,
+            "current": 1,
+            "violations": 0,
+            "action": "restrict"
+          },
+          "Gi1/0/45": {
+            "maximum": 2,
+            "current": 1,
+            "violations": 0,
+            "action": "restrict"
+          },
+          "Gi1/0/46": {
+            "maximum": 2,
+            "current": 1,
+            "violations": 0,
+            "action": "restrict"
+          },
+          "Gi1/0/47": {
+            "maximum": 2,
+            "current": 1,
+            "violations": 0,
+            "action": "restrict"
+          },
+          "Gi1/0/48": {
+            "maximum": 2,
+            "current": 1,
+            "violations": 0,
+            "action": "restrict"
+          }
+        }
+      }
+    },
+    "show power inline": {
+      "status": "UNSUPPORTED",
+      "raw_lines": 55
+    },
+    "show authentication sessions": {
+      "status": "UNSUPPORTED",
+      "raw_lines": 2
+    },
+    "show ip dhcp snooping": {
+      "status": "UNSUPPORTED",
+      "raw_lines": 3
+    },
+    "show ip dhcp snooping binding": {
+      "status": "UNSUPPORTED",
+      "raw_lines": 3
+    },
+    "show device-tracking database": {
+      "status": "UNSUPPORTED",
+      "raw_lines": 2
+    },
+    "show processes cpu sorted": {
+      "status": "UNSUPPORTED",
+      "raw_lines": 6
+    },
+    "show processes memory sorted": {
+      "status": "UNSUPPORTED",
+      "raw_lines": 7
+    },
+    "show logging": {
+      "status": "UNSUPPORTED",
+      "raw_lines": 17
+    },
+    "show running-config": {
+      "status": "PARSED",
+      "data": {
+        "stanzas": {
+          "global": [],
+          "service timestamps debug datetime msec localtime show-timezone": [],
+          "service timestamps log datetime msec localtime show-timezone": [],
+          "service password-encryption": [],
+          "service sequence-numbers": [],
+          "no service pad": [],
+          "hostname C9300-ACCESS-01": [],
+          "boot-start-marker": [],
+          "boot-end-marker": [],
+          "logging buffered 65536 warnings": [],
+          "logging console errors": [],
+          "no logging monitor": [],
+          "no ip domain-lookup": [],
+          "ip domain-name lab.example.com": [],
+          "ip name-server 192.0.2.53 192.0.2.54": [],
+          "clock timezone CST -6 0": [],
+          "no ip http server": [],
+          "no ip http secure-server": [],
+          "ip ssh version 2": [],
+          "ip ssh time-out 60": [],
+          "ip ssh authentication-retries 3": [],
+          "username netops privilege 15 secret 0 REPLACE_ME_LOCAL_NETOPS_SECRET": [],
+          "username breakglass privilege 15 secret 0 REPLACE_ME_BREAKGLASS_SECRET": [],
+          "username auditor privilege 5 secret 0 REPLACE_ME_AUDITOR_SECRET": [],
+          "enable secret 0 REPLACE_ME_ENABLE_SECRET": [],
+          "aaa new-model": [],
+          "tacacs server TACACS-PRIMARY": [
+            "address ipv4 192.0.2.20",
+            "timeout 5",
+            "key 0 REPLACE_ME_TACACS_SHARED_KEY"
+          ],
+          "tacacs server TACACS-SECONDARY": [
+            "address ipv4 192.0.2.21",
+            "timeout 5",
+            "key 0 REPLACE_ME_TACACS_SHARED_KEY"
+          ],
+          "aaa group server tacacs+ TACACS-GROUP": [
+            "server name TACACS-PRIMARY",
+            "server name TACACS-SECONDARY",
+            "ip tacacs source-interface Vlan10"
+          ],
+          "aaa authentication login default group TACACS-GROUP local": [],
+          "aaa authentication login CONSOLE local": [],
+          "aaa authorization exec default group TACACS-GROUP local if-authenticated": [],
+          "aaa authorization commands 15 default group TACACS-GROUP local": [],
+          "aaa accounting exec default start-stop group TACACS-GROUP": [],
+          "aaa accounting commands 15 default start-stop group TACACS-GROUP": [],
+          "login on-success log": [],
+          "login on-failure log": [],
+          "vtp mode transparent": [],
+          "spanning-tree mode rapid-pvst": [],
+          "spanning-tree extend system-id": [],
+          "spanning-tree portfast default": [],
+          "spanning-tree bpduguard default": [],
+          "vlan 10": [
+            "name MGMT"
+          ],
+          "vlan 20": [
+            "name USERS"
+          ],
+          "vlan 30": [
+            "name VOICE"
+          ],
+          "interface Vlan10": [
+            "description MGMT_GATEWAY",
+            "ip address 192.0.2.2 255.255.255.0",
+            "no shutdown"
+          ],
+          "interface Vlan20": [
+            "description USERS_GATEWAY",
+            "ip address 198.51.100.1 255.255.255.0",
+            "ip access-group USERS-IN in",
+            "no shutdown"
+          ],
+          "interface Vlan30": [
+            "description VOICE_GATEWAY",
+            "ip address 203.0.113.1 255.255.255.0",
+            "ip access-group VOICE-IN in",
+            "no shutdown"
+          ],
+          "ip routing": [],
+          "interface Loopback0": [
+            "description ROUTER_ID",
+            "ip address 10.255.255.10 255.255.255.255"
+          ],
+          "interface TenGigabitEthernet1/1/1": [
+            "description ROUTED_UPLINK_TO_CORE-01",
+            "no switchport",
+            "ip address 10.255.0.2 255.255.255.252",
+            "no shutdown"
+          ],
+          "interface TenGigabitEthernet1/1/2": [
+            "description SPARE_UPLINK",
+            "shutdown"
+          ],
+          "interface TenGigabitEthernet1/1/3": [
+            "description UNUSED",
+            "shutdown"
+          ],
+          "interface TenGigabitEthernet1/1/4": [
+            "description UNUSED",
+            "shutdown"
+          ],
+          "interface GigabitEthernet1/0/1": [
+            "description USER_01",
+            "switchport mode access",
+            "switchport access vlan 20",
+            "switchport nonegotiate",
+            "switchport port-security",
+            "switchport port-security maximum 2",
+            "switchport port-security violation restrict",
+            "switchport port-security aging time 10",
+            "switchport port-security aging type inactivity",
+            "spanning-tree portfast",
+            "spanning-tree bpduguard enable",
+            "storm-control broadcast level 1.00",
+            "storm-control multicast level 2.00",
+            "no shutdown"
+          ],
+          "interface GigabitEthernet1/0/2": [
+            "description USER_02",
+            "switchport mode access",
+            "switchport access vlan 20",
+            "switchport nonegotiate",
+            "switchport port-security",
+            "switchport port-security maximum 2",
+            "switchport port-security violation restrict",
+            "switchport port-security aging time 10",
+            "switchport port-security aging type inactivity",
+            "spanning-tree portfast",
+            "spanning-tree bpduguard enable",
+            "storm-control broadcast level 1.00",
+            "storm-control multicast level 2.00",
+            "no shutdown"
+          ],
+          "interface GigabitEthernet1/0/3": [
+            "description USER_03",
+            "switchport mode access",
+            "switchport access vlan 20",
+            "switchport nonegotiate",
+            "switchport port-security",
+            "switchport port-security maximum 2",
+            "switchport port-security violation restrict",
+            "switchport port-security aging time 10",
+            "switchport port-security aging type inactivity",
+            "spanning-tree portfast",
+            "spanning-tree bpduguard enable",
+            "storm-control broadcast level 1.00",
+            "storm-control multicast level 2.00",
+            "no shutdown"
+          ],
+          "interface GigabitEthernet1/0/4": [
+            "description USER_04",
+            "switchport mode access",
+            "switchport access vlan 20",
+            "switchport nonegotiate",
+            "switchport port-security",
+            "switchport port-security maximum 2",
+            "switchport port-security violation restrict",
+            "switchport port-security aging time 10",
+            "switchport port-security aging type inactivity",
+            "spanning-tree portfast",
+            "spanning-tree bpduguard enable",
+            "storm-control broadcast level 1.00",
+            "storm-control multicast level 2.00",
+            "no shutdown"
+          ],
+          "interface GigabitEthernet1/0/5": [
+            "description USER_05",
+            "switchport mode access",
+            "switchport access vlan 20",
+            "switchport nonegotiate",
+            "switchport port-security",
+            "switchport port-security maximum 2",
+            "switchport port-security violation restrict",
+            "switchport port-security aging time 10",
+            "switchport port-security aging type inactivity",
+            "spanning-tree portfast",
+            "spanning-tree bpduguard enable",
+            "storm-control broadcast level 1.00",
+            "storm-control multicast level 2.00",
+            "no shutdown"
+          ],
+          "interface GigabitEthernet1/0/6": [
+            "description USER_06",
+            "switchport mode access",
+            "switchport access vlan 20",
+            "switchport nonegotiate",
+            "switchport port-security",
+            "switchport port-security maximum 2",
+            "switchport port-security violation restrict",
+            "switchport port-security aging time 10",
+            "switchport port-security aging type inactivity",
+            "spanning-tree portfast",
+            "spanning-tree bpduguard enable",
+            "storm-control broadcast level 1.00",
+            "storm-control multicast level 2.00",
+            "no shutdown"
+          ],
+          "interface GigabitEthernet1/0/7": [
+            "description USER_07",
+            "switchport mode access",
+            "switchport access vlan 20",
+            "switchport nonegotiate",
+            "switchport port-security",
+            "switchport port-security maximum 2",
+            "switchport port-security violation restrict",
+            "switchport port-security aging time 10",
+            "switchport port-security aging type inactivity",
+            "spanning-tree portfast",
+            "spanning-tree bpduguard enable",
+            "storm-control broadcast level 1.00",
+            "storm-control multicast level 2.00",
+            "no shutdown"
+          ],
+          "interface GigabitEthernet1/0/8": [
+            "description USER_08",
+            "switchport mode access",
+            "switchport access vlan 20",
+            "switchport nonegotiate",
+            "switchport port-security",
+            "switchport port-security maximum 2",
+            "switchport port-security violation restrict",
+            "switchport port-security aging time 10",
+            "switchport port-security aging type inactivity",
+            "spanning-tree portfast",
+            "spanning-tree bpduguard enable",
+            "storm-control broadcast level 1.00",
+            "storm-control multicast level 2.00",
+            "no shutdown"
+          ],
+          "interface GigabitEthernet1/0/9": [
+            "description USER_09",
+            "switchport mode access",
+            "switchport access vlan 20",
+            "switchport nonegotiate",
+            "switchport port-security",
+            "switchport port-security maximum 2",
+            "switchport port-security violation restrict",
+            "switchport port-security aging time 10",
+            "switchport port-security aging type inactivity",
+            "spanning-tree portfast",
+            "spanning-tree bpduguard enable",
+            "storm-control broadcast level 1.00",
+            "storm-control multicast level 2.00",
+            "no shutdown"
+          ],
+          "interface GigabitEthernet1/0/10": [
+            "description USER_10",
+            "switchport mode access",
+            "switchport access vlan 20",
+            "switchport nonegotiate",
+            "switchport port-security",
+            "switchport port-security maximum 2",
+            "switchport port-security violation restrict",
+            "switchport port-security aging time 10",
+            "switchport port-security aging type inactivity",
+            "spanning-tree portfast",
+            "spanning-tree bpduguard enable",
+            "storm-control broadcast level 1.00",
+            "storm-control multicast level 2.00",
+            "no shutdown"
+          ],
+          "interface GigabitEthernet1/0/11": [
+            "description USER_11",
+            "switchport mode access",
+            "switchport access vlan 20",
+            "switchport nonegotiate",
+            "switchport port-security",
+            "switchport port-security maximum 2",
+            "switchport port-security violation restrict",
+            "switchport port-security aging time 10",
+            "switchport port-security aging type inactivity",
+            "spanning-tree portfast",
+            "spanning-tree bpduguard enable",
+            "storm-control broadcast level 1.00",
+            "storm-control multicast level 2.00",
+            "no shutdown"
+          ],
+          "interface GigabitEthernet1/0/12": [
+            "description USER_12",
+            "switchport mode access",
+            "switchport access vlan 20",
+            "switchport nonegotiate",
+            "switchport port-security",
+            "switchport port-security maximum 2",
+            "switchport port-security violation restrict",
+            "switchport port-security aging time 10",
+            "switchport port-security aging type inactivity",
+            "spanning-tree portfast",
+            "spanning-tree bpduguard enable",
+            "storm-control broadcast level 1.00",
+            "storm-control multicast level 2.00",
+            "no shutdown"
+          ],
+          "interface GigabitEthernet1/0/13": [
+            "description USER_13",
+            "switchport mode access",
+            "switchport access vlan 20",
+            "switchport nonegotiate",
+            "switchport port-security",
+            "switchport port-security maximum 2",
+            "switchport port-security violation restrict",
+            "switchport port-security aging time 10",
+            "switchport port-security aging type inactivity",
+            "spanning-tree portfast",
+            "spanning-tree bpduguard enable",
+            "storm-control broadcast level 1.00",
+            "storm-control multicast level 2.00",
+            "no shutdown"
+          ],
+          "interface GigabitEthernet1/0/14": [
+            "description USER_14",
+            "switchport mode access",
+            "switchport access vlan 20",
+            "switchport nonegotiate",
+            "switchport port-security",
+            "switchport port-security maximum 2",
+            "switchport port-security violation restrict",
+            "switchport port-security aging time 10",
+            "switchport port-security aging type inactivity",
+            "spanning-tree portfast",
+            "spanning-tree bpduguard enable",
+            "storm-control broadcast level 1.00",
+            "storm-control multicast level 2.00",
+            "no shutdown"
+          ],
+          "interface GigabitEthernet1/0/15": [
+            "description USER_15",
+            "switchport mode access",
+            "switchport access vlan 20",
+            "switchport nonegotiate",
+            "switchport port-security",
+            "switchport port-security maximum 2",
+            "switchport port-security violation restrict",
+            "switchport port-security aging time 10",
+            "switchport port-security aging type inactivity",
+            "spanning-tree portfast",
+            "spanning-tree bpduguard enable",
+            "storm-control broadcast level 1.00",
+            "storm-control multicast level 2.00",
+            "no shutdown"
+          ],
+          "interface GigabitEthernet1/0/16": [
+            "description USER_16",
+            "switchport mode access",
+            "switchport access vlan 20",
+            "switchport nonegotiate",
+            "switchport port-security",
+            "switchport port-security maximum 2",
+            "switchport port-security violation restrict",
+            "switchport port-security aging time 10",
+            "switchport port-security aging type inactivity",
+            "spanning-tree portfast",
+            "spanning-tree bpduguard enable",
+            "storm-control broadcast level 1.00",
+            "storm-control multicast level 2.00",
+            "no shutdown"
+          ],
+          "interface GigabitEthernet1/0/17": [
+            "description PHONE_17",
+            "switchport mode access",
+            "switchport access vlan 30",
+            "switchport nonegotiate",
+            "switchport port-security",
+            "switchport port-security maximum 2",
+            "switchport port-security violation restrict",
+            "switchport port-security aging time 10",
+            "switchport port-security aging type inactivity",
+            "spanning-tree portfast",
+            "spanning-tree bpduguard enable",
+            "storm-control broadcast level 1.00",
+            "storm-control multicast level 2.00",
+            "no shutdown"
+          ],
+          "interface GigabitEthernet1/0/18": [
+            "description PHONE_18",
+            "switchport mode access",
+            "switchport access vlan 30",
+            "switchport nonegotiate",
+            "switchport port-security",
+            "switchport port-security maximum 2",
+            "switchport port-security violation restrict",
+            "switchport port-security aging time 10",
+            "switchport port-security aging type inactivity",
+            "spanning-tree portfast",
+            "spanning-tree bpduguard enable",
+            "storm-control broadcast level 1.00",
+            "storm-control multicast level 2.00",
+            "no shutdown"
+          ],
+          "interface GigabitEthernet1/0/19": [
+            "description PHONE_19",
+            "switchport mode access",
+            "switchport access vlan 30",
+            "switchport nonegotiate",
+            "switchport port-security",
+            "switchport port-security maximum 2",
+            "switchport port-security violation restrict",
+            "switchport port-security aging time 10",
+            "switchport port-security aging type inactivity",
+            "spanning-tree portfast",
+            "spanning-tree bpduguard enable",
+            "storm-control broadcast level 1.00",
+            "storm-control multicast level 2.00",
+            "no shutdown"
+          ],
+          "interface GigabitEthernet1/0/20": [
+            "description PHONE_20",
+            "switchport mode access",
+            "switchport access vlan 30",
+            "switchport nonegotiate",
+            "switchport port-security",
+            "switchport port-security maximum 2",
+            "switchport port-security violation restrict",
+            "switchport port-security aging time 10",
+            "switchport port-security aging type inactivity",
+            "spanning-tree portfast",
+            "spanning-tree bpduguard enable",
+            "storm-control broadcast level 1.00",
+            "storm-control multicast level 2.00",
+            "no shutdown"
+          ],
+          "interface GigabitEthernet1/0/21": [
+            "description PHONE_21",
+            "switchport mode access",
+            "switchport access vlan 30",
+            "switchport nonegotiate",
+            "switchport port-security",
+            "switchport port-security maximum 2",
+            "switchport port-security violation restrict",
+            "switchport port-security aging time 10",
+            "switchport port-security aging type inactivity",
+            "spanning-tree portfast",
+            "spanning-tree bpduguard enable",
+            "storm-control broadcast level 1.00",
+            "storm-control multicast level 2.00",
+            "no shutdown"
+          ],
+          "interface GigabitEthernet1/0/22": [
+            "description PHONE_22",
+            "switchport mode access",
+            "switchport access vlan 30",
+            "switchport nonegotiate",
+            "switchport port-security",
+            "switchport port-security maximum 2",
+            "switchport port-security violation restrict",
+            "switchport port-security aging time 10",
+            "switchport port-security aging type inactivity",
+            "spanning-tree portfast",
+            "spanning-tree bpduguard enable",
+            "storm-control broadcast level 1.00",
+            "storm-control multicast level 2.00",
+            "no shutdown"
+          ],
+          "interface GigabitEthernet1/0/23": [
+            "description PHONE_23",
+            "switchport mode access",
+            "switchport access vlan 30",
+            "switchport nonegotiate",
+            "switchport port-security",
+            "switchport port-security maximum 2",
+            "switchport port-security violation restrict",
+            "switchport port-security aging time 10",
+            "switchport port-security aging type inactivity",
+            "spanning-tree portfast",
+            "spanning-tree bpduguard enable",
+            "storm-control broadcast level 1.00",
+            "storm-control multicast level 2.00",
+            "no shutdown"
+          ],
+          "interface GigabitEthernet1/0/24": [
+            "description PHONE_24",
+            "switchport mode access",
+            "switchport access vlan 30",
+            "switchport nonegotiate",
+            "switchport port-security",
+            "switchport port-security maximum 2",
+            "switchport port-security violation restrict",
+            "switchport port-security aging time 10",
+            "switchport port-security aging type inactivity",
+            "spanning-tree portfast",
+            "spanning-tree bpduguard enable",
+            "storm-control broadcast level 1.00",
+            "storm-control multicast level 2.00",
+            "no shutdown"
+          ],
+          "interface GigabitEthernet1/0/25": [
+            "description PHONE_25",
+            "switchport mode access",
+            "switchport access vlan 30",
+            "switchport nonegotiate",
+            "switchport port-security",
+            "switchport port-security maximum 2",
+            "switchport port-security violation restrict",
+            "switchport port-security aging time 10",
+            "switchport port-security aging type inactivity",
+            "spanning-tree portfast",
+            "spanning-tree bpduguard enable",
+            "storm-control broadcast level 1.00",
+            "storm-control multicast level 2.00",
+            "no shutdown"
+          ],
+          "interface GigabitEthernet1/0/26": [
+            "description PHONE_26",
+            "switchport mode access",
+            "switchport access vlan 30",
+            "switchport nonegotiate",
+            "switchport port-security",
+            "switchport port-security maximum 2",
+            "switchport port-security violation restrict",
+            "switchport port-security aging time 10",
+            "switchport port-security aging type inactivity",
+            "spanning-tree portfast",
+            "spanning-tree bpduguard enable",
+            "storm-control broadcast level 1.00",
+            "storm-control multicast level 2.00",
+            "no shutdown"
+          ],
+          "interface GigabitEthernet1/0/27": [
+            "description PHONE_27",
+            "switchport mode access",
+            "switchport access vlan 30",
+            "switchport nonegotiate",
+            "switchport port-security",
+            "switchport port-security maximum 2",
+            "switchport port-security violation restrict",
+            "switchport port-security aging time 10",
+            "switchport port-security aging type inactivity",
+            "spanning-tree portfast",
+            "spanning-tree bpduguard enable",
+            "storm-control broadcast level 1.00",
+            "storm-control multicast level 2.00",
+            "no shutdown"
+          ],
+          "interface GigabitEthernet1/0/28": [
+            "description PHONE_28",
+            "switchport mode access",
+            "switchport access vlan 30",
+            "switchport nonegotiate",
+            "switchport port-security",
+            "switchport port-security maximum 2",
+            "switchport port-security violation restrict",
+            "switchport port-security aging time 10",
+            "switchport port-security aging type inactivity",
+            "spanning-tree portfast",
+            "spanning-tree bpduguard enable",
+            "storm-control broadcast level 1.00",
+            "storm-control multicast level 2.00",
+            "no shutdown"
+          ],
+          "interface GigabitEthernet1/0/29": [
+            "description PHONE_29",
+            "switchport mode access",
+            "switchport access vlan 30",
+            "switchport nonegotiate",
+            "switchport port-security",
+            "switchport port-security maximum 2",
+            "switchport port-security violation restrict",
+            "switchport port-security aging time 10",
+            "switchport port-security aging type inactivity",
+            "spanning-tree portfast",
+            "spanning-tree bpduguard enable",
+            "storm-control broadcast level 1.00",
+            "storm-control multicast level 2.00",
+            "no shutdown"
+          ],
+          "interface GigabitEthernet1/0/30": [
+            "description PHONE_30",
+            "switchport mode access",
+            "switchport access vlan 30",
+            "switchport nonegotiate",
+            "switchport port-security",
+            "switchport port-security maximum 2",
+            "switchport port-security violation restrict",
+            "switchport port-security aging time 10",
+            "switchport port-security aging type inactivity",
+            "spanning-tree portfast",
+            "spanning-tree bpduguard enable",
+            "storm-control broadcast level 1.00",
+            "storm-control multicast level 2.00",
+            "no shutdown"
+          ],
+          "interface GigabitEthernet1/0/31": [
+            "description PHONE_31",
+            "switchport mode access",
+            "switchport access vlan 30",
+            "switchport nonegotiate",
+            "switchport port-security",
+            "switchport port-security maximum 2",
+            "switchport port-security violation restrict",
+            "switchport port-security aging time 10",
+            "switchport port-security aging type inactivity",
+            "spanning-tree portfast",
+            "spanning-tree bpduguard enable",
+            "storm-control broadcast level 1.00",
+            "storm-control multicast level 2.00",
+            "no shutdown"
+          ],
+          "interface GigabitEthernet1/0/32": [
+            "description PHONE_32",
+            "switchport mode access",
+            "switchport access vlan 30",
+            "switchport nonegotiate",
+            "switchport port-security",
+            "switchport port-security maximum 2",
+            "switchport port-security violation restrict",
+            "switchport port-security aging time 10",
+            "switchport port-security aging type inactivity",
+            "spanning-tree portfast",
+            "spanning-tree bpduguard enable",
+            "storm-control broadcast level 1.00",
+            "storm-control multicast level 2.00",
+            "no shutdown"
+          ],
+          "interface GigabitEthernet1/0/33": [
+            "description MGMT_DEVICE_33",
+            "switchport mode access",
+            "switchport access vlan 10",
+            "switchport nonegotiate",
+            "switchport port-security",
+            "switchport port-security maximum 2",
+            "switchport port-security violation restrict",
+            "switchport port-security aging time 10",
+            "switchport port-security aging type inactivity",
+            "spanning-tree portfast",
+            "spanning-tree bpduguard enable",
+            "storm-control broadcast level 1.00",
+            "storm-control multicast level 2.00",
+            "no shutdown"
+          ],
+          "interface GigabitEthernet1/0/34": [
+            "description MGMT_DEVICE_34",
+            "switchport mode access",
+            "switchport access vlan 10",
+            "switchport nonegotiate",
+            "switchport port-security",
+            "switchport port-security maximum 2",
+            "switchport port-security violation restrict",
+            "switchport port-security aging time 10",
+            "switchport port-security aging type inactivity",
+            "spanning-tree portfast",
+            "spanning-tree bpduguard enable",
+            "storm-control broadcast level 1.00",
+            "storm-control multicast level 2.00",
+            "no shutdown"
+          ],
+          "interface GigabitEthernet1/0/35": [
+            "description MGMT_DEVICE_35",
+            "switchport mode access",
+            "switchport access vlan 10",
+            "switchport nonegotiate",
+            "switchport port-security",
+            "switchport port-security maximum 2",
+            "switchport port-security violation restrict",
+            "switchport port-security aging time 10",
+            "switchport port-security aging type inactivity",
+            "spanning-tree portfast",
+            "spanning-tree bpduguard enable",
+            "storm-control broadcast level 1.00",
+            "storm-control multicast level 2.00",
+            "no shutdown"
+          ],
+          "interface GigabitEthernet1/0/36": [
+            "description MGMT_DEVICE_36",
+            "switchport mode access",
+            "switchport access vlan 10",
+            "switchport nonegotiate",
+            "switchport port-security",
+            "switchport port-security maximum 2",
+            "switchport port-security violation restrict",
+            "switchport port-security aging time 10",
+            "switchport port-security aging type inactivity",
+            "spanning-tree portfast",
+            "spanning-tree bpduguard enable",
+            "storm-control broadcast level 1.00",
+            "storm-control multicast level 2.00",
+            "no shutdown"
+          ],
+          "interface GigabitEthernet1/0/37": [
+            "description MGMT_DEVICE_37",
+            "switchport mode access",
+            "switchport access vlan 10",
+            "switchport nonegotiate",
+            "switchport port-security",
+            "switchport port-security maximum 2",
+            "switchport port-security violation restrict",
+            "switchport port-security aging time 10",
+            "switchport port-security aging type inactivity",
+            "spanning-tree portfast",
+            "spanning-tree bpduguard enable",
+            "storm-control broadcast level 1.00",
+            "storm-control multicast level 2.00",
+            "no shutdown"
+          ],
+          "interface GigabitEthernet1/0/38": [
+            "description MGMT_DEVICE_38",
+            "switchport mode access",
+            "switchport access vlan 10",
+            "switchport nonegotiate",
+            "switchport port-security",
+            "switchport port-security maximum 2",
+            "switchport port-security violation restrict",
+            "switchport port-security aging time 10",
+            "switchport port-security aging type inactivity",
+            "spanning-tree portfast",
+            "spanning-tree bpduguard enable",
+            "storm-control broadcast level 1.00",
+            "storm-control multicast level 2.00",
+            "no shutdown"
+          ],
+          "interface GigabitEthernet1/0/39": [
+            "description MGMT_DEVICE_39",
+            "switchport mode access",
+            "switchport access vlan 10",
+            "switchport nonegotiate",
+            "switchport port-security",
+            "switchport port-security maximum 2",
+            "switchport port-security violation restrict",
+            "switchport port-security aging time 10",
+            "switchport port-security aging type inactivity",
+            "spanning-tree portfast",
+            "spanning-tree bpduguard enable",
+            "storm-control broadcast level 1.00",
+            "storm-control multicast level 2.00",
+            "no shutdown"
+          ],
+          "interface GigabitEthernet1/0/40": [
+            "description MGMT_DEVICE_40",
+            "switchport mode access",
+            "switchport access vlan 10",
+            "switchport nonegotiate",
+            "switchport port-security",
+            "switchport port-security maximum 2",
+            "switchport port-security violation restrict",
+            "switchport port-security aging time 10",
+            "switchport port-security aging type inactivity",
+            "spanning-tree portfast",
+            "spanning-tree bpduguard enable",
+            "storm-control broadcast level 1.00",
+            "storm-control multicast level 2.00",
+            "no shutdown"
+          ],
+          "interface GigabitEthernet1/0/41": [
+            "description MGMT_DEVICE_41",
+            "switchport mode access",
+            "switchport access vlan 10",
+            "switchport nonegotiate",
+            "switchport port-security",
+            "switchport port-security maximum 2",
+            "switchport port-security violation restrict",
+            "switchport port-security aging time 10",
+            "switchport port-security aging type inactivity",
+            "spanning-tree portfast",
+            "spanning-tree bpduguard enable",
+            "storm-control broadcast level 1.00",
+            "storm-control multicast level 2.00",
+            "no shutdown"
+          ],
+          "interface GigabitEthernet1/0/42": [
+            "description MGMT_DEVICE_42",
+            "switchport mode access",
+            "switchport access vlan 10",
+            "switchport nonegotiate",
+            "switchport port-security",
+            "switchport port-security maximum 2",
+            "switchport port-security violation restrict",
+            "switchport port-security aging time 10",
+            "switchport port-security aging type inactivity",
+            "spanning-tree portfast",
+            "spanning-tree bpduguard enable",
+            "storm-control broadcast level 1.00",
+            "storm-control multicast level 2.00",
+            "no shutdown"
+          ],
+          "interface GigabitEthernet1/0/43": [
+            "description MGMT_DEVICE_43",
+            "switchport mode access",
+            "switchport access vlan 10",
+            "switchport nonegotiate",
+            "switchport port-security",
+            "switchport port-security maximum 2",
+            "switchport port-security violation restrict",
+            "switchport port-security aging time 10",
+            "switchport port-security aging type inactivity",
+            "spanning-tree portfast",
+            "spanning-tree bpduguard enable",
+            "storm-control broadcast level 1.00",
+            "storm-control multicast level 2.00",
+            "no shutdown"
+          ],
+          "interface GigabitEthernet1/0/44": [
+            "description MGMT_DEVICE_44",
+            "switchport mode access",
+            "switchport access vlan 10",
+            "switchport nonegotiate",
+            "switchport port-security",
+            "switchport port-security maximum 2",
+            "switchport port-security violation restrict",
+            "switchport port-security aging time 10",
+            "switchport port-security aging type inactivity",
+            "spanning-tree portfast",
+            "spanning-tree bpduguard enable",
+            "storm-control broadcast level 1.00",
+            "storm-control multicast level 2.00",
+            "no shutdown"
+          ],
+          "interface GigabitEthernet1/0/45": [
+            "description MGMT_DEVICE_45",
+            "switchport mode access",
+            "switchport access vlan 10",
+            "switchport nonegotiate",
+            "switchport port-security",
+            "switchport port-security maximum 2",
+            "switchport port-security violation restrict",
+            "switchport port-security aging time 10",
+            "switchport port-security aging type inactivity",
+            "spanning-tree portfast",
+            "spanning-tree bpduguard enable",
+            "storm-control broadcast level 1.00",
+            "storm-control multicast level 2.00",
+            "no shutdown"
+          ],
+          "interface GigabitEthernet1/0/46": [
+            "description MGMT_DEVICE_46",
+            "switchport mode access",
+            "switchport access vlan 10",
+            "switchport nonegotiate",
+            "switchport port-security",
+            "switchport port-security maximum 2",
+            "switchport port-security violation restrict",
+            "switchport port-security aging time 10",
+            "switchport port-security aging type inactivity",
+            "spanning-tree portfast",
+            "spanning-tree bpduguard enable",
+            "storm-control broadcast level 1.00",
+            "storm-control multicast level 2.00",
+            "no shutdown"
+          ],
+          "interface GigabitEthernet1/0/47": [
+            "description MGMT_DEVICE_47",
+            "switchport mode access",
+            "switchport access vlan 10",
+            "switchport nonegotiate",
+            "switchport port-security",
+            "switchport port-security maximum 2",
+            "switchport port-security violation restrict",
+            "switchport port-security aging time 10",
+            "switchport port-security aging type inactivity",
+            "spanning-tree portfast",
+            "spanning-tree bpduguard enable",
+            "storm-control broadcast level 1.00",
+            "storm-control multicast level 2.00",
+            "no shutdown"
+          ],
+          "interface GigabitEthernet1/0/48": [
+            "description MGMT_DEVICE_48",
+            "switchport mode access",
+            "switchport access vlan 10",
+            "switchport nonegotiate",
+            "switchport port-security",
+            "switchport port-security maximum 2",
+            "switchport port-security violation restrict",
+            "switchport port-security aging time 10",
+            "switchport port-security aging type inactivity",
+            "spanning-tree portfast",
+            "spanning-tree bpduguard enable",
+            "storm-control broadcast level 1.00",
+            "storm-control multicast level 2.00",
+            "no shutdown"
+          ],
+          "ip access-list standard MGMT-SOURCES": [
+            "10 permit 192.0.2.0 0.0.0.255",
+            "20 deny any log"
+          ],
+          "ip access-list standard SNMP-MANAGERS": [
+            "10 permit host 192.0.2.40",
+            "20 permit host 192.0.2.41",
+            "30 deny any"
+          ],
+          "ip access-list extended USERS-IN": [
+            "10 permit udp 198.51.100.0 0.0.0.255 any eq bootps",
+            "20 permit udp 198.51.100.0 0.0.0.255 any eq domain",
+            "30 deny ip 198.51.100.0 0.0.0.255 192.0.2.0 0.0.0.255 log",
+            "40 permit ip 198.51.100.0 0.0.0.255 any"
+          ],
+          "ip access-list extended VOICE-IN": [
+            "10 permit udp 203.0.113.0 0.0.0.255 any eq domain",
+            "20 deny ip 203.0.113.0 0.0.0.255 192.0.2.0 0.0.0.255 log",
+            "30 permit ip 203.0.113.0 0.0.0.255 any"
+          ],
+          "route-map BGP-OUT permit 10": [
+            "match ip address prefix-list LOCAL-NETS"
+          ],
+          "ip prefix-list LOCAL-NETS seq 5 permit 192.0.2.0/24": [],
+          "ip prefix-list LOCAL-NETS seq 10 permit 198.51.100.0/24": [],
+          "ip prefix-list LOCAL-NETS seq 15 permit 203.0.113.0/24": [],
+          "router bgp 65010": [
+            "bgp router-id 10.255.255.10",
+            "bgp log-neighbor-changes",
+            "neighbor 10.255.0.1 remote-as 65000",
+            "neighbor 10.255.0.1 description CORE-01",
+            "neighbor 10.255.0.1 password 0 REPLACE_ME_BGP_PASSWORD",
+            "address-family ipv4",
+            "network 192.0.2.0 mask 255.255.255.0",
+            "network 198.51.100.0 mask 255.255.255.0",
+            "network 203.0.113.0 mask 255.255.255.0",
+            "neighbor 10.255.0.1 activate",
+            "neighbor 10.255.0.1 route-map BGP-OUT out",
+            "exit-address-family"
+          ],
+          "logging host 192.0.2.30 transport udp port 514": [],
+          "logging host 192.0.2.31 transport udp port 514": [],
+          "logging trap informational": [],
+          "logging facility local7": [],
+          "logging source-interface Vlan10": [],
+          "ntp source Vlan10": [],
+          "ntp server 192.0.2.50 prefer": [],
+          "ntp server 192.0.2.51": [],
+          "snmp-server view MONITOR-VIEW iso included": [],
+          "snmp-server group MONITOR-V3 v3 priv read MONITOR-VIEW access SNMP-MANAGERS": [],
+          "snmp-server user snmpmon MONITOR-V3 v3 auth sha REPLACE_ME_SNMP_AUTH_PRIV_PASSWORD priv aes 128 REPLACE_ME_SNMP_PRIVACY_PASSWORD": [],
+          "snmp-server location LAB-DATACENTER-RACK-A1": [],
+          "snmp-server contact NetOps-Example": [],
+          "snmp-server enable traps snmp linkdown linkup coldstart warmstart": [],
+          "snmp-server enable traps config": [],
+          "snmp-server host 192.0.2.40 version 3 priv snmpmon": [],
+          "archive": [
+            "log config",
+            "logging enable",
+            "notify syslog contenttype plaintext",
+            "hidekeys"
+          ],
+          "line con 0": [
+            "exec-timeout 10 0",
+            "logging synchronous",
+            "login authentication CONSOLE"
+          ],
+          "line vty 0 4": [
+            "access-class MGMT-SOURCES in",
+            "exec-timeout 10 0",
+            "logging synchronous",
+            "transport input ssh",
+            "login authentication default"
+          ],
+          "line vty 5 15": [
+            "access-class MGMT-SOURCES in",
+            "exec-timeout 10 0",
+            "logging synchronous",
+            "transport input ssh",
+            "login authentication default"
+          ]
+        }
+      }
+    }
+  }
+}

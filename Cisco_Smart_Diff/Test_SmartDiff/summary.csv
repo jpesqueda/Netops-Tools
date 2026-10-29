@@ -1,0 +1,44 @@
+﻿Command,Status,Changes
+show clock,UNSUPPORTED,0
+show version,EXPECTED,1
+show inventory,UNSUPPORTED,0
+show switch,UNSUPPORTED,0
+show module,UNSUPPORTED,0
+show environment all,PASS,0
+show license summary,UNSUPPORTED,0
+show interfaces,UNSUPPORTED,0
+show interfaces description,UNSUPPORTED,0
+show interfaces counters,UNSUPPORTED,0
+show interfaces counters errors,UNSUPPORTED,0
+show interface status,PASS,0
+show interfaces switchport,UNSUPPORTED,0
+show ip interface brief,PASS,0
+show vlan brief,PASS,0
+show spanning-tree summary,UNSUPPORTED,0
+show spanning-tree root,UNSUPPORTED,0
+show interfaces trunk,UNSUPPORTED,0
+show interfaces link,UNSUPPORTED,0
+show interfaces transceiver detail,UNSUPPORTED,0
+show mac address-table,UNSUPPORTED,0
+show mac address-table count,UNSUPPORTED,0
+show ip arp,UNSUPPORTED,0
+show ip arp inspection interfaces,UNSUPPORTED,0
+show ip route,PASS,0
+show ip route summary,UNSUPPORTED,0
+show ip protocols,UNSUPPORTED,0
+show ip bgp summary,PASS,0
+show cdp neighbors,UNSUPPORTED,0
+show cdp neighbors detail,UNSUPPORTED,0
+show lldp neighbors,UNSUPPORTED,0
+show lldp neighbors detail,UNSUPPORTED,0
+show etherchannel summary,UNSUPPORTED,0
+show port-security,PASS,0
+show power inline,UNSUPPORTED,0
+show authentication sessions,UNSUPPORTED,0
+show ip dhcp snooping,UNSUPPORTED,0
+show ip dhcp snooping binding,UNSUPPORTED,0
+show device-tracking database,UNSUPPORTED,0
+show processes cpu sorted,UNSUPPORTED,0
+show processes memory sorted,UNSUPPORTED,0
+show logging,UNSUPPORTED,0
+show running-config,PASS,0
