@@ -1,0 +1,12 @@
+# Catalyst IOS-XE - selected fan/power/temperature status rows.
+Value SWITCH (\d+)
+Value COMPONENT (\S+(?:\s+\S+)?)
+Value STATUS (\S+(?:\s+\S+)?)
+Value TEMPERATURE_C (\d+(?:\.\d+)?)
+
+Start
+  ^\s*Switch\s+${SWITCH}\s+FAN\s+${COMPONENT}\s+is\s+${STATUS}\s*$$ -> Record
+  ^\s*FAN\s+${COMPONENT}\s+is\s+${STATUS}\s*$$ -> Record
+  ^\s*(?:Power Supply|POWER SUPPLY|PSU)\s+${COMPONENT}\s+is\s+${STATUS}\s*$$ -> Record
+  ^\s*SYSTEM TEMPERATURE\s+is\s+${STATUS}\s*$$ -> Record
+  ^\s*Temperature\s*:\s*${TEMPERATURE_C}\s*(?:C|Degree Celsius|degrees C)?\s*$$ -> Record

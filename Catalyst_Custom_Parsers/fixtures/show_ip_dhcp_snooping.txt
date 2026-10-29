@@ -1,0 +1,7 @@
+Switch DHCP snooping is enabled
+DHCP snooping is configured on following VLANs: 10,20
+DHCP snooping is operational on following VLANs: 10,20
+Insertion of option 82 is enabled
+Interface                 Trusted    Rate limit (pps)
+Gi1/0/1                   no         150
+Gi1/0/48                  yes        unlimited

@@ -1,0 +1,10 @@
+# Supports whitespace-separated and pipe-separated table examples.
+Value Required INTERFACE (\S+)
+Value TRUST_STATE (\S+)
+Value RATE_PPS (\S+)
+Value BURST_INTERVAL (\S+)
+
+Start
+  ^\s*${INTERFACE}\s+${TRUST_STATE}\s+${RATE_PPS}\s+${BURST_INTERVAL}\s*$$ -> Record
+  ^\s*${INTERFACE}\s+${TRUST_STATE}\s+${RATE_PPS}\s*$$ -> Record
+  ^\s*${INTERFACE}\s*\|\s*${TRUST_STATE}\s*\|\s*${RATE_PPS}\s*$$ -> Record

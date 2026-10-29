@@ -1,0 +1,9 @@
+Template, Hostname, Platform, Command
+cisco_ios_show_interfaces_counters_errors.textfsm, .*, cisco_ios, sh[[ow]] int[[erfaces]] cou[[nters]] er[[rors]]
+cisco_ios_show_ip_arp_inspection_interfaces.textfsm, .*, cisco_ios, sh[[ow]] ip arp insp[[ection]] int[[erfaces]]
+cisco_ios_show_device-tracking_database.textfsm, .*, cisco_ios, sh[[ow]] device-tracking database
+cisco_ios_show_interfaces_counters.textfsm, .*, cisco_ios, sh[[ow]] int[[erfaces]] cou[[nters]]
+cisco_ios_show_interfaces_trunk.textfsm, .*, cisco_ios, sh[[ow]] int[[erfaces]] trunk
+cisco_ios_show_environment_all.textfsm, .*, cisco_ios, sh[[ow]] env[[ironment]] all
+cisco_ios_show_ip_dhcp_snooping.textfsm, .*, cisco_ios, sh[[ow]] ip dhcp snoop[[ing]]$
+cisco_ios_show_ip_protocols.textfsm, .*, cisco_ios, sh[[ow]] ip prot[[ocols]]$

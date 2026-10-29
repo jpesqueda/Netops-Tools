@@ -1,0 +1,15 @@
+{
+  "platform": "cisco_ios",
+  "templates": {
+    "show environment all": "cisco_ios_show_environment_all.textfsm",
+    "show interfaces counters": "cisco_ios_show_interfaces_counters.textfsm",
+    "show interfaces counters errors": "cisco_ios_show_interfaces_counters_errors.textfsm",
+    "show interfaces trunk": "cisco_ios_show_interfaces_trunk.textfsm",
+    "show ip arp inspection interfaces": "cisco_ios_show_ip_arp_inspection_interfaces.textfsm",
+    "show ip protocols": "cisco_ios_show_ip_protocols.textfsm",
+    "show ip dhcp snooping": "cisco_ios_show_ip_dhcp_snooping.textfsm",
+    "show device-tracking database": "cisco_ios_show_device-tracking_database.textfsm"
+  },
+  "running_config_ttp": "TTP/cisco_ios_show_running-config.ttp",
+  "note": "Output-variant coverage is limited until tested with actual IOS-XE samples."
+}

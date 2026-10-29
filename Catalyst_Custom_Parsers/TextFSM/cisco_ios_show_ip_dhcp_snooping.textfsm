@@ -1,0 +1,18 @@
+# Key summary settings and per-port trust/rate rows.
+Value SWITCH_STATUS (\S+)
+Value CONFIGURED_VLANS (\S+)
+Value OPERATIONAL_VLANS (\S+)
+Value OPTION82 (\S+)
+Value INTERFACE (\S+)
+Value TRUST (\S+)
+Value RATE_PPS (\S+)
+
+Start
+  ^\s*Switch DHCP snooping is ${SWITCH_STATUS}\s*$$ -> Record
+  ^\s*DHCP snooping is configured on following VLANs:\s*${CONFIGURED_VLANS}\s*$$ -> Record
+  ^\s*DHCP snooping is operational on following VLANs:\s*${OPERATIONAL_VLANS}\s*$$ -> Record
+  ^\s*Insertion of option 82 is ${OPTION82}\s*$$ -> Record
+  ^\s*Interface\s+Trusted\s+Rate limit \(pps\)\s*$$ -> Interfaces
+
+Interfaces
+  ^\s*${INTERFACE}\s+${TRUST}\s+${RATE_PPS}\s*$$ -> Record

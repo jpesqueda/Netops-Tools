@@ -1,0 +1,15 @@
+<group name="system">
+hostname {{ hostname }}
+</group>
+
+<group name="interfaces*">
+interface {{ name }}
+ description {{ description | ORPHRASE }}
+ switchport access vlan {{ access_vlan }}
+ switchport voice vlan {{ voice_vlan }}
+</group>
+
+<group name="bgp">
+router bgp {{ asn }}
+ bgp router-id {{ router_id }}
+</group>

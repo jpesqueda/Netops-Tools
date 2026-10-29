@@ -1,0 +1,19 @@
+# Summary records by protocol; this does not decode all nested protocol detail.
+Value Filldown PROTOCOL ([^"\r\n]+)
+Value REDISTRIBUTING (.+)
+Value NETWORK (.+)
+Value DISTANCE (.+)
+
+Start
+  ^\s*Routing Protocol is "${PROTOCOL}"\s*$$ -> Record
+  ^\s*Redistributing:\s+${REDISTRIBUTING}\s*$$ -> Record
+  ^\s*Distance:\s+${DISTANCE}\s*$$ -> Record
+  ^\s*Routing for Networks:\s*$$ -> Networks
+
+Networks
+  ^\s{4,}${NETWORK}\s*$$ -> Record
+  ^\s*Routing Information Sources:\s*$$ -> Start
+  ^\s*Distance:\s+${DISTANCE}\s*$$ -> Start
+  ^\s*Routing Protocol is "${PROTOCOL}"\s*$$ -> Start
+
+EOF

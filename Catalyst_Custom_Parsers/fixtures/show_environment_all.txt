@@ -1,0 +1,6 @@
+Switch 1 FAN 1 is OK
+Switch 1 FAN 2 is OK
+FAN 3 is OK
+Power Supply 1 is OK
+SYSTEM TEMPERATURE is OK
+Temperature : 31 Degree Celsius

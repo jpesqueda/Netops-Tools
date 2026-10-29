@@ -1,0 +1,36 @@
+# Multiple tables in IOS-XE; rows should be merged by PORT for Excel.
+Value Required PORT (\S+)
+Value MODE (\S+)
+Value ENCAPSULATION (\S+)
+Value STATUS (\S+)
+Value NATIVE_VLAN (\S+)
+Value ALLOWED_VLANS (\S+)
+Value ACTIVE_VLANS (\S+)
+Value FORWARDING_VLANS (\S+)
+
+Start
+  ^\s*Port\s+Mode\s+Encapsulation\s+Status\s+Native vlan\s*$$ -> StatusTable
+  ^\s*Port\s+Vlans allowed on trunk\s*$$ -> AllowedTable
+  ^\s*Port\s+Vlans allowed and active in management domain\s*$$ -> ActiveTable
+  ^\s*Port\s+Vlans in spanning tree forwarding state and not pruned\s*$$ -> ForwardTable
+
+StatusTable
+  ^\s*${PORT}\s+${MODE}\s+${ENCAPSULATION}\s+${STATUS}\s+${NATIVE_VLAN}\s*$$ -> Record
+  ^\s*Port\s+Vlans allowed on trunk\s*$$ -> AllowedTable
+  ^\s*Port\s+Vlans allowed and active in management domain\s*$$ -> ActiveTable
+  ^\s*Port\s+Vlans in spanning tree forwarding state and not pruned\s*$$ -> ForwardTable
+
+AllowedTable
+  ^\s*${PORT}\s+${ALLOWED_VLANS}\s*$$ -> Record
+  ^\s*Port\s+Vlans allowed and active in management domain\s*$$ -> ActiveTable
+  ^\s*Port\s+Vlans in spanning tree forwarding state and not pruned\s*$$ -> ForwardTable
+  ^\s*Port\s+Mode\s+Encapsulation\s+Status\s+Native vlan\s*$$ -> StatusTable
+
+ActiveTable
+  ^\s*${PORT}\s+${ACTIVE_VLANS}\s*$$ -> Record
+  ^\s*Port\s+Vlans in spanning tree forwarding state and not pruned\s*$$ -> ForwardTable
+  ^\s*Port\s+Vlans allowed on trunk\s*$$ -> AllowedTable
+
+ForwardTable
+  ^\s*${PORT}\s+${FORWARDING_VLANS}\s*$$ -> Record
+  ^\s*Port\s+Mode\s+Encapsulation\s+Status\s+Native vlan\s*$$ -> StatusTable

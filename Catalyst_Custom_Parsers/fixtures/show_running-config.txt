@@ -1,0 +1,11 @@
+version 17.12
+hostname SW01
+!
+interface GigabitEthernet1/0/1
+ description USER-PC
+ switchport access vlan 10
+ switchport voice vlan 20
+!
+router bgp 65001
+ bgp router-id 192.0.2.1
+!

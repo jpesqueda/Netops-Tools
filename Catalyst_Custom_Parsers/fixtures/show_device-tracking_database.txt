@@ -1,0 +1,3 @@
+IP Address       MAC Address       Vlan Interface State
+192.0.2.10       aaaa.bbbb.cccc    10   Gi1/0/1   REACHABLE
+192.0.2.11       dddd.eeee.ffff    20   Gi1/0/2   STALE

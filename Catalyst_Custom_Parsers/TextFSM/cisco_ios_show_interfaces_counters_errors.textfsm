@@ -1,0 +1,12 @@
+# Common Catalyst error counter table variants.
+Value Required PORT (\S+)
+Value ALIGN_ERR (\d+)
+Value FCS_ERR (\d+)
+Value XMIT_ERR (\d+)
+Value RCV_ERR (\d+)
+Value UNDERSIZE (\d+)
+Value OUTDISCARDS (\d+)
+
+Start
+  ^\s*${PORT}\s+${ALIGN_ERR}\s+${FCS_ERR}\s+${XMIT_ERR}\s+${RCV_ERR}\s+${UNDERSIZE}\s+${OUTDISCARDS}\s*$$ -> Record
+  ^\s*${PORT}\s+${ALIGN_ERR}\s+${FCS_ERR}\s+${XMIT_ERR}\s+${RCV_ERR}\s*$$ -> Record

@@ -1,0 +1,24 @@
+# The two counter blocks yield separate rows; pivot/merge rows by PORT for Excel.
+Value Required PORT (\S+)
+Value IN_OCTETS (\d+)
+Value IN_UCAST (\d+)
+Value IN_MCAST (\d+)
+Value IN_BCAST (\d+)
+Value OUT_OCTETS (\d+)
+Value OUT_UCAST (\d+)
+Value OUT_MCAST (\d+)
+Value OUT_BCAST (\d+)
+
+Start
+  ^\s*Port\s+InOctets\s+InUcastPkts\s+InMcastPkts\s+InBcastPkts\s*$$ -> InCounters
+  ^\s*Port\s+OutOctets\s+OutUcastPkts\s+OutMcastPkts\s+OutBcastPkts\s*$$ -> OutCounters
+
+InCounters
+  ^\s*${PORT}\s+${IN_OCTETS}\s+${IN_UCAST}\s+${IN_MCAST}\s+${IN_BCAST}\s*$$ -> Record
+  ^\s*Port\s+OutOctets\s+OutUcastPkts\s+OutMcastPkts\s+OutBcastPkts\s*$$ -> OutCounters
+  ^\s*Port\s+InOctets\s+InUcastPkts\s+InMcastPkts\s+InBcastPkts\s*$$ -> InCounters
+
+OutCounters
+  ^\s*${PORT}\s+${OUT_OCTETS}\s+${OUT_UCAST}\s+${OUT_MCAST}\s+${OUT_BCAST}\s*$$ -> Record
+  ^\s*Port\s+InOctets\s+InUcastPkts\s+InMcastPkts\s+InBcastPkts\s*$$ -> InCounters
+  ^\s*Port\s+OutOctets\s+OutUcastPkts\s+OutMcastPkts\s+OutBcastPkts\s*$$ -> OutCounters

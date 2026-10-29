@@ -1,0 +1,6 @@
+Routing Protocol is "ospf 10"
+  Redistributing: connected
+  Routing for Networks:
+    192.0.2.0 0.0.0.255 area 0
+  Routing Information Sources:
+  Distance: (default is 110)
