@@ -1,61 +1,78 @@
 #!/usr/bin/env python3
-"""pesping: concurrent ICMP monitor for maintenance windows and upgrade validation."""
 
-from __future__ import annotations
+"""PESPING - Concurrent IPv4 scanner and ICMP upgrade monitor.
+
+Version: 1.1.0
+Python: 3.10+
+Platforms: Windows, Linux, and macOS (system ping command required)
+
+Overview:
+    Perform a single ICMP scan or continuously monitor hosts during network
+    maintenance. Targets may be supplied as one host, a host file, an inclusive
+    IPv4 range, or an IPv4 CIDR subnet. Network probes execute concurrently.
+
+Dependencies:
+    Python standard library; optional `colorama` for terminal colors.
+    Install the optional dependency with: pip install colorama
+
+Example commands (documentation-only addresses from RFC 5737):
+    python pesping.py -ho 192.0.2.10
+    python pesping.py -hf hosts.txt --monitor --only-changes
+    python pesping.py -r 192.0.2.100-192.0.2.200
+    python pesping.py -r 192.0.2.100-200 --show up
+    python pesping.py -s 192.0.2.0/24 --show down
+    python pesping.py -s 198.51.100.0/26 --monitor --workers 20
+
+Example hosts.txt:
+    # Name,IP address (all fictional)
+    switch01.example.test,192.0.2.10
+    switch02.example.test,192.0.2.11
+
+Operational notes:
+    * ICMP success means the target answered ping, not that applications or
+      routing protocols have recovered.
+    * ICMP failure does not prove that a device is offline; firewalls may
+      block or rate-limit echo requests.
+    * --max-hosts prevents accidental oversized scans by default.
+    * --show filters single-scan output, not continuous monitoring events.
+    * Monitoring timestamps and downtime are local process observations.
+    * Run scans only on systems and networks you are authorized to test.
+
+Security and privacy:
+    All examples use reserved documentation IPv4 ranges (RFC 5737) and
+    fictional .test domain names. No production IPs or user credentials
+    are embedded in this file. Logs and CSVs contain actual target data
+    supplied at runtime; handle generated outputs accordingly.
+"""
 
 import argparse
-import concurrent.futures as futures
+import concurrent.futures
 import csv
-from dataclasses import dataclass
-from datetime import datetime
+import datetime as dt
 import ipaddress
 import math
-from pathlib import Path
+import os
 import platform
-import re
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
+
+__version__ = "1.1.0"
 
 try:
-    from colorama import Fore, Style, init as colorama_init
+    from colorama import Fore, Style, init
+    init(autoreset=True)
+    GREEN, RED, CYAN, YELLOW, RESET = Fore.GREEN, Fore.RED, Fore.CYAN, Fore.YELLOW, Style.RESET_ALL
 except ImportError:
-    print("Missing dependency: colorama. Install it with: pip install colorama", file=sys.stderr)
-    sys.exit(2)
-
-
-STATUS_UP = "UP"
-STATUS_DOWN = "DOWN"
-STATUS_PENDING = "PENDING"
-STATUS_UNKNOWN = "UNKNOWN"
-CSV_FIELDS = [
-    "timestamp",
-    "event",
-    "host",
-    "address",
-    "status",
-    "outages",
-    "downtime_seconds",
-    "downtime",
-]
-TARGET_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:%-]{0,254}$")
-IP_RANGE_RE = re.compile(r"^(\d{1,3}(?:\.\d{1,3}){3})-(\d{1,3}|\d{1,3}(?:\.\d{1,3}){3})$")
-MAX_GENERATED_HOSTS = 65_536
-
-
-@dataclass(frozen=True)
-class Device:
-    host: str
-    address: str
-
-    @property
-    def key(self) -> str:
-        return self.address.lower()
+    GREEN = RED = CYAN = YELLOW = RESET = ""
 
 
 @dataclass
+# Persistent monitoring state for each host.
 class DeviceState:
-    state: str = STATUS_UNKNOWN
+    """Per-target state used for debounced UP/DOWN detection and downtime."""
+    state: str = "UNKNOWN"
     fail_streak: int = 0
     success_streak: int = 0
     first_failure: float | None = None
@@ -63,706 +80,506 @@ class DeviceState:
     down_since: float | None = None
     outages: int = 0
     total_downtime: float = 0.0
-    longest_outage: float = 0.0
 
 
-@dataclass(frozen=True)
-class PingResult:
-    device: Device
-    success: bool
-    timestamp: float
-    error: str | None = None
+# ============================================================================
+# TIME FORMATTING AND EXPORT HELPERS
+# ============================================================================
+def timestamp():
+    """Return the current local time formatted for a console event."""
+    return dt.datetime.now().strftime("%H:%M:%S")
 
 
-@dataclass(frozen=True)
-class MonitorEvent:
-    event: str
-    device: Device
-    timestamp: float
-    downtime_seconds: float = 0.0
+def full_timestamp():
+    """Return the current local date and time for exported event records."""
+    return dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-@dataclass(frozen=True)
-class MonitorConfig:
-    interval: float
-    timeout: float
-    fail_threshold: int
-    recovery_threshold: int
-    workers: int
-    only_changes: bool
-    wait_for_up: bool
-    stop_when_all_up: bool
+def format_duration(seconds):
+    """Format a nonnegative elapsed duration as HH:MM:SS."""
+    h, rem = divmod(max(0, int(seconds)), 3600)
+    m, s = divmod(rem, 60)
+    return f"{h:02}:{m:02}:{s:02}"
 
 
-@dataclass
-class EventSink:
-    log_path: Path | None = None
-    csv_path: Path | None = None
-    log_failed: bool = False
-    csv_failed: bool = False
+def write_log(filename, message):
+    """Append a timestamped event to the optional plain-text log file."""
+    if filename:
+        with open(filename, "a", encoding="utf-8") as f:
+            f.write(f"[{full_timestamp()}] {message}\n")
 
 
-def format_datetime(timestamp: float) -> str:
-    return datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
+def write_csv_event(filename, event, host, status, downtime=0, outages=0):
+    """Append one lifecycle event to CSV, writing column headers as needed."""
+    if not filename:
+        return
+
+    new_file = not os.path.exists(filename) or os.path.getsize(filename) == 0
+    fields = ["timestamp", "event", "host", "address", "status", "outages", "downtime_seconds", "downtime"]
+
+    with open(filename, "a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fields)
+        if new_file:
+            writer.writeheader()
+        writer.writerow({
+            "timestamp": full_timestamp(),
+            "event": event,
+            "host": host["name"],
+            "address": host["address"],
+            "status": status,
+            "outages": outages,
+            "downtime_seconds": round(downtime, 2),
+            "downtime": format_duration(downtime),
+        })
 
 
-def format_clock(timestamp: float | None = None) -> str:
-    return datetime.fromtimestamp(timestamp or time.time()).strftime("%H:%M:%S")
-
-
-def format_duration(seconds: float) -> str:
-    total = max(0, int(seconds))
-    hours, remainder = divmod(total, 3600)
-    minutes, secs = divmod(remainder, 60)
-    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
-
-
-def format_value(value: float) -> str:
-    return f"{value:g}"
-
-
-def format_csv_seconds(seconds: float) -> str:
-    return "0" if seconds <= 0 else f"{seconds:.1f}"
-
-
-def color_text(text: str, color: str) -> str:
-    return f"{color}{text}{Style.RESET_ALL}"
-
-
-def color_status(status: str, width: int = 0) -> str:
-    label = f"{status:<{width}}" if width else status
-    colors = {
-        STATUS_UP: Fore.GREEN,
-        STATUS_DOWN: Fore.RED,
-        STATUS_PENDING: Fore.YELLOW,
-        STATUS_UNKNOWN: Fore.YELLOW,
-    }
-    return color_text(label, colors.get(status, Fore.WHITE))
-
-
-def warn(message: str) -> None:
-    print(color_text(f"WARNING: {message}", Fore.YELLOW), file=sys.stderr)
-
-
-def normalize_path(value: str | None) -> Path | None:
-    return Path(value).expanduser() if value else None
-
-
-def is_valid_target(value: str) -> bool:
-    if not value or len(value) > 255 or value.startswith("-"):
-        return False
-    if any(char.isspace() for char in value):
-        return False
-    return bool(TARGET_RE.fullmatch(value))
-
-
-def parse_host_line(line: str, line_number: int) -> tuple[Device | None, str | None]:
-    try:
-        fields = next(csv.reader([line], skipinitialspace=True))
-    except csv.Error as exc:
-        return None, f"line {line_number}: CSV parse error: {exc}"
-
-    fields = [field.strip() for field in fields]
-    if len(fields) == 1:
-        host = address = fields[0]
-    elif len(fields) == 2:
-        host, address = fields
-    else:
-        return None, f"line {line_number}: expected HOST or HOST,ADDRESS"
-
-    if not is_valid_target(host) or not is_valid_target(address):
-        return None, f"line {line_number}: invalid host entry '{line}'"
-    return Device(host=host, address=address), None
-
-
-def duplicate_keys(device: Device) -> set[str]:
-    return {f"host:{device.host.lower()}", f"addr:{device.address.lower()}"}
-
-
-def load_hosts(file_path: str) -> tuple[list[Device], list[str]]:
-    path = Path(file_path).expanduser()
-    if not path.exists():
-        raise ValueError(f"host file does not exist: {path}")
-    if not path.is_file():
-        raise ValueError(f"host path is not a file: {path}")
-
-    devices: list[Device] = []
-    warnings: list[str] = []
-    invalid: list[str] = []
-    seen: set[str] = set()
+# ============================================================================
+# TARGET FILE AND IP EXPANSION
+# ============================================================================
+def load_hosts(filename):
+    """Load named or unnamed targets, skipping comments and duplicate addresses."""
+    hosts, seen = [], set()
 
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except UnicodeDecodeError:
-        lines = path.read_text().splitlines()
-    except OSError as exc:
-        raise ValueError(f"could not read host file {path}: {exc}") from exc
+        with open(filename, encoding="utf-8") as f:
+            for number, raw in enumerate(f, 1):
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
 
-    for line_number, raw_line in enumerate(lines, 1):
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
-            continue
+                if "," in line:
+                    name, address = [x.strip() for x in line.split(",", 1)]
+                else:
+                    name = address = line
 
-        device, error = parse_host_line(line, line_number)
-        if error:
-            invalid.append(error)
-            continue
+                if not name or not address:
+                    print(f"{YELLOW}WARNING:{RESET} Invalid line {number}: {line}")
+                    continue
+                if address in seen:
+                    continue
 
-        keys = duplicate_keys(device)
-        if seen.intersection(keys):
-            warnings.append(f"line {line_number}: duplicate host ignored: {device.host} ({device.address})")
-            continue
+                seen.add(address)
+                hosts.append({"name": name, "address": address})
 
-        seen.update(keys)
-        devices.append(device)
-
-    if invalid:
-        raise ValueError("invalid host file entries:\n  - " + "\n  - ".join(invalid))
-    if not devices:
-        raise ValueError(f"host file is empty or contains no usable hosts: {path}")
-    return devices, warnings
-
-
-def device_from_host(host: str) -> Device:
-    target = host.strip()
-    if not is_valid_target(target):
-        raise ValueError(f"invalid host value: {host}")
-    return Device(host=target, address=target)
-
-
-def devices_from_network(value: str) -> list[Device]:
-    try:
-        network = ipaddress.ip_network(value, strict=False)
-    except ValueError as exc:
-        raise ValueError(f"invalid subnet '{value}': use CIDR format like 192.168.10.0/24") from exc
-
-    if network.num_addresses > MAX_GENERATED_HOSTS:
-        raise ValueError(
-            f"subnet {network} is too large ({network.num_addresses} addresses); "
-            f"maximum allowed is {MAX_GENERATED_HOSTS}"
-        )
-
-    devices = [Device(host=str(ip), address=str(ip)) for ip in network.hosts()]
-    if not devices:
-        raise ValueError(f"subnet {network} does not contain usable hosts")
-    return devices
-
-
-def devices_from_range(value: str) -> list[Device]:
-    match = IP_RANGE_RE.fullmatch(value)
-    if not match:
-        raise ValueError("invalid range format; use 192.168.10.1-50 or 192.168.10.1-192.168.10.50")
-
-    try:
-        start_ip = ipaddress.IPv4Address(match.group(1))
-        end_value = match.group(2)
-        if "." in end_value:
-            end_ip = ipaddress.IPv4Address(end_value)
-        else:
-            octets = match.group(1).split(".")
-            end_ip = ipaddress.IPv4Address(".".join([*octets[:3], end_value]))
-    except ipaddress.AddressValueError as exc:
-        raise ValueError(f"invalid IPv4 range '{value}'") from exc
-
-    start_int = int(start_ip)
-    end_int = int(end_ip)
-    if end_int < start_int:
-        raise ValueError(f"invalid IPv4 range '{value}': end address is lower than start address")
-
-    count = end_int - start_int + 1
-    if count > MAX_GENERATED_HOSTS:
-        raise ValueError(
-            f"range {value} is too large ({count} addresses); maximum allowed is {MAX_GENERATED_HOSTS}"
-        )
-
-    return [
-        Device(host=str(ipaddress.IPv4Address(address)), address=str(ipaddress.IPv4Address(address)))
-        for address in range(start_int, end_int + 1)
-    ]
-
-
-def load_subnet(value: str) -> tuple[list[Device], list[str]]:
-    target = value.strip()
-    if not target or target.startswith("-"):
-        raise ValueError(f"invalid subnet or range value: {value}")
-    if "-" in target and "/" not in target:
-        return devices_from_range(target), []
-    return devices_from_network(target), []
-
-
-def build_ping_command(host: str, timeout: float) -> list[str]:
-    system = platform.system()
-    timeout_ms = str(max(1, int(math.ceil(timeout * 1000))))
-    timeout_seconds = str(max(1, int(math.ceil(timeout))))
-
-    if system == "Windows":
-        return ["ping", "-n", "1", "-w", timeout_ms, host]
-    if system == "Darwin":
-        return ["ping", "-c", "1", "-W", timeout_ms, host]
-    return ["ping", "-c", "1", "-W", timeout_seconds, host]
-
-
-def ping_host(device: Device, timeout: float) -> PingResult:
-    started = time.time()
-    try:
-        completed = subprocess.run(
-            build_ping_command(device.address, timeout),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=max(timeout + 1.0, 2.0),
-            check=False,
-        )
-        return PingResult(device=device, success=completed.returncode == 0, timestamp=time.time())
-    except subprocess.TimeoutExpired:
-        return PingResult(device=device, success=False, timestamp=time.time(), error="ping command timed out")
     except FileNotFoundError:
-        return PingResult(device=device, success=False, timestamp=started, error="ping command not found")
+        sys.exit(f"ERROR: Host file '{filename}' was not found.")
     except OSError as exc:
-        return PingResult(device=device, success=False, timestamp=time.time(), error=str(exc))
+        sys.exit(f"ERROR: Unable to read '{filename}': {exc}")
+
+    if not hosts:
+        sys.exit("ERROR: No valid hosts were found.")
+
+    return hosts
 
 
-def ping_all(devices: list[Device], timeout: float, workers: int) -> list[PingResult]:
-    max_workers = min(max(1, workers), len(devices))
-    results: list[PingResult | None] = [None] * len(devices)
 
-    with futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_map = {
-            executor.submit(ping_host, device, timeout): index
-            for index, device in enumerate(devices)
-        }
-        for future in futures.as_completed(future_map):
-            index = future_map[future]
+def parse_range(spec):
+    """Expand inclusive IPv4 ranges.
+
+    Full endpoints may span subnet boundaries. A numeric-only end uses the
+    first three octets of the start address; descending ranges are rejected.
+    Returns integer addresses suitable for lazy iteration.
+    """
+    parts = spec.split("-")
+    if len(parts) != 2 or not all(parts):
+        raise ValueError("Range must be START-IP-END-IP or START-IP-LAST-OCTET")
+    start_text, end_text = (part.strip() for part in parts)
+    try:
+        start = ipaddress.IPv4Address(start_text)
+        if "." in end_text:
+            end = ipaddress.IPv4Address(end_text)
+        else:
+            if not end_text.isdecimal() or not 0 <= int(end_text) <= 255:
+                raise ValueError("Abbreviated range end must be an octet from 0 to 255")
+            end = ipaddress.IPv4Address(".".join(start_text.split(".")[:3]) + "." + str(int(end_text)))
+    except ipaddress.AddressValueError as exc:
+        raise ValueError(str(exc)) from exc
+    if int(end) < int(start):
+        raise ValueError("Range end must be greater than or equal to its start")
+    return int(start), int(end)
+
+
+def load_targets(args, parser):
+    """Resolve CLI target selection into host dictionaries.
+
+    CIDR scans use network.hosts(), excluding network/broadcast on typical
+    subnets but retaining addresses on /31 and /32. IPv4 range boundaries
+    are inclusive. Enforce max-hosts before expansion where possible.
+    """
+    if args.host_file:
+        hosts = load_hosts(args.host_file)
+    elif args.host:
+        hosts = [{"name": args.host, "address": args.host}]
+    else:
+        try:
+            if args.subnet:
+                network = ipaddress.IPv4Network(args.subnet, strict=False)
+                count = network.num_addresses if network.prefixlen >= 31 else network.num_addresses - 2
+                if count > args.max_hosts:
+                    parser.error(f"Subnet has {count:,} target IPs; --max-hosts is {args.max_hosts:,}. Increase --max-hosts intentionally to proceed.")
+                addresses = (str(ip) for ip in network.hosts())
+            else:
+                start, end = parse_range(args.range)
+                count = end - start + 1
+                if count > args.max_hosts:
+                    parser.error(f"Range has {count:,} target IPs; --max-hosts is {args.max_hosts:,}.")
+                addresses = (str(ipaddress.IPv4Address(i)) for i in range(start, end + 1))
+            hosts = [{"name": address, "address": address} for address in addresses]
+        except (ValueError, ipaddress.NetmaskValueError) as exc:
+            parser.error(str(exc))
+    if len(hosts) > args.max_hosts:
+        parser.error(f"Host file has {len(hosts):,} targets; increase --max-hosts (currently {args.max_hosts:,}).")
+    return hosts
+
+
+# ============================================================================
+# CROSS-PLATFORM ICMP PROBING
+# ============================================================================
+def ping_host(host, timeout=1):
+    """Send one ICMP echo request using the host operating system ping command."""
+    address = host["address"]
+    system = platform.system().lower()
+
+    if system == "windows":
+        cmd = ["ping", "-n", "1", "-w", str(int(timeout * 1000)), address]
+    elif system == "darwin":
+        cmd = ["ping", "-c", "1", "-W", str(int(timeout * 1000)), address]
+    else:
+        cmd = ["ping", "-c", "1", "-W", str(max(1, math.ceil(timeout))), address]
+
+    try:
+        result = subprocess.run(
+            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=timeout + 1
+        )
+        return result.returncode == 0
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+
+
+def ping_all(hosts, timeout, workers):
+    """Probe targets concurrently and map each address to its response status."""
+    results = {}
+    max_workers = min(workers, max(1, len(hosts)))
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {pool.submit(ping_host, host, timeout): host for host in hosts}
+        for future in concurrent.futures.as_completed(futures):
+            host = futures[future]
             try:
-                results[index] = future.result()
-            except Exception as exc:
-                device = devices[index]
-                results[index] = PingResult(
-                    device=device, success=False, timestamp=time.time(), error=str(exc)
-                )
+                results[host["address"]] = future.result()
+            except Exception:
+                results[host["address"]] = False
 
-    return [result for result in results if result is not None]
+    return results
 
 
-def process_result(result: PingResult, state: DeviceState, config: MonitorConfig) -> MonitorEvent | None:
-    now = result.timestamp
-    if result.success:
+# ============================================================================
+# STATE TRANSITIONS AND EVENT REPORTING
+# ============================================================================
+def emit_event(event, host, state, log_file=None, csv_file=None, downtime=0):
+    """Print a state transition and optionally persist it to text/CSV logs."""
+    name, address = host["name"], host["address"]
+
+    if event in ("UP", "INITIAL_UP"):
+        print(
+            f"[{timestamp()}] {GREEN}UP{RESET}     {name:<30}"
+            + (f" downtime {YELLOW}{format_duration(downtime)}{RESET}" if event == "UP" else "")
+        )
+        status = "UP"
+    else:
+        print(f"[{timestamp()}] {RED}DOWN{RESET}   {name}")
+        status = "DOWN"
+
+    log_msg = f"{event} {name} ({address})"
+    if event == "UP":
+        log_msg += f" downtime {format_duration(downtime)}"
+
+    write_log(log_file, log_msg)
+    write_csv_event(csv_file, event, host, status, downtime, state.outages)
+
+
+def process_result(host, alive, state, fail_threshold, recovery_threshold, log_file, csv_file):
+    """Update hysteresis counters and state; return True on confirmed DOWN."""
+    now = time.time()
+
+    if alive:
         state.fail_streak = 0
         state.first_failure = None
 
-        if state.state == STATUS_DOWN:
+        if state.state in ("UNKNOWN", "DOWN"):
             if state.success_streak == 0:
                 state.first_recovery = now
             state.success_streak += 1
-            if state.success_streak < config.recovery_threshold:
-                return None
 
-            downtime = max(0.0, now - (state.down_since if state.down_since is not None else now))
-            state.total_downtime += downtime
-            state.longest_outage = max(state.longest_outage, downtime)
-            state.state = STATUS_UP
+            if state.success_streak >= recovery_threshold:
+                recovery_time = state.first_recovery or now
+
+                if state.state == "DOWN":
+                    downtime = recovery_time - (state.down_since or recovery_time)
+                    state.total_downtime += downtime
+                    state.state = "UP"
+                    state.success_streak = 0
+                    state.first_recovery = None
+                    state.down_since = None
+                    emit_event("UP", host, state, log_file, csv_file, downtime)
+                else:
+                    state.state = "UP"
+                    state.success_streak = 0
+                    state.first_recovery = None
+                    emit_event("INITIAL_UP", host, state, log_file, csv_file)
+
+        else:
             state.success_streak = 0
             state.first_recovery = None
-            state.down_since = None
-            return MonitorEvent(
-                event=STATUS_UP, device=result.device, timestamp=now, downtime_seconds=downtime
-            )
 
-        if state.state in {STATUS_UNKNOWN, STATUS_PENDING}:
-            if state.success_streak == 0:
-                state.first_recovery = now
-            state.success_streak += 1
-            needed = config.recovery_threshold if config.wait_for_up else 1
-            if state.success_streak < needed:
-                state.state = STATUS_PENDING
-                return None
-
-            state.state = STATUS_UP
-            state.success_streak = 0
-            state.first_recovery = None
-            return MonitorEvent(STATUS_UP, result.device, now, 0.0) if config.wait_for_up else None
-
-        state.success_streak = 0
-        return None
+        return False
 
     state.success_streak = 0
     state.first_recovery = None
-    if state.state == STATUS_DOWN:
-        return None
 
-    if state.fail_streak == 0:
-        state.first_failure = now
-    state.fail_streak += 1
-    if state.state == STATUS_UNKNOWN:
-        state.state = STATUS_PENDING
+    if state.state in ("UNKNOWN", "UP"):
+        if state.fail_streak == 0:
+            state.first_failure = now
+        state.fail_streak += 1
 
-    if state.fail_streak < config.fail_threshold:
-        return None
+        if state.fail_streak >= fail_threshold:
+            was_up = state.state == "UP"
+            state.state = "DOWN"
+            state.down_since = state.first_failure or now
+            state.fail_streak = 0
+            state.first_failure = None
+            state.outages += 1
+            emit_event("DOWN" if was_up else "INITIAL_DOWN", host, state, log_file, csv_file)
+            return True
 
-    state.state = STATUS_DOWN
-    state.down_since = state.first_failure if state.first_failure is not None else now
-    state.outages += 1
-    state.fail_streak = 0
-    state.first_failure = None
-    return MonitorEvent(event=STATUS_DOWN, device=result.device, timestamp=now)
+    else:
+        state.fail_streak = 0
+        state.first_failure = None
 
-
-def prepare_output_files(sink: EventSink) -> None:
-    for path in (sink.log_path, sink.csv_path):
-        if not path:
-            continue
-        try:
-            if path.parent != Path("."):
-                path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("a", encoding="utf-8"):
-                pass
-        except OSError as exc:
-            raise RuntimeError(f"could not prepare output file {path}: {exc}") from exc
-
-    if sink.csv_path:
-        try:
-            if not sink.csv_path.exists() or sink.csv_path.stat().st_size == 0:
-                with sink.csv_path.open("a", newline="", encoding="utf-8") as csv_file:
-                    csv.DictWriter(csv_file, fieldnames=CSV_FIELDS).writeheader()
-        except OSError as exc:
-            raise RuntimeError(f"could not prepare CSV file {sink.csv_path}: {exc}") from exc
+    return False
 
 
-def write_log(sink: EventSink, timestamp: float, message: str) -> None:
-    if not sink.log_path or sink.log_failed:
-        return
-    try:
-        with sink.log_path.open("a", encoding="utf-8") as log_file:
-            log_file.write(f"[{format_datetime(timestamp)}] {message}\n")
-    except OSError as exc:
-        sink.log_failed = True
-        warn(f"could not write log file {sink.log_path}: {exc}")
+# ============================================================================
+# MONITORING STATUS AND SUMMARY
+# ============================================================================
+def get_counts(states):
+    """Count UP, DOWN, and UNKNOWN host states for the current monitoring cycle."""
+    values = [s.state for s in states.values()]
+    return values.count("UP"), values.count("DOWN"), values.count("UNKNOWN")
 
 
-def write_csv_event(sink: EventSink, event: MonitorEvent, state: DeviceState) -> None:
-    if not sink.csv_path or sink.csv_failed:
-        return
-    try:
-        needs_header = not sink.csv_path.exists() or sink.csv_path.stat().st_size == 0
-        with sink.csv_path.open("a", newline="", encoding="utf-8") as csv_file:
-            writer = csv.DictWriter(csv_file, fieldnames=CSV_FIELDS)
-            if needs_header:
-                writer.writeheader()
-            writer.writerow(
-                {
-                    "timestamp": format_datetime(event.timestamp),
-                    "event": event.event,
-                    "host": event.device.host,
-                    "address": event.device.address,
-                    "status": event.event,
-                    "outages": state.outages,
-                    "downtime_seconds": format_csv_seconds(event.downtime_seconds),
-                    "downtime": format_duration(event.downtime_seconds),
-                }
-            )
-    except OSError as exc:
-        sink.csv_failed = True
-        warn(f"could not write CSV file {sink.csv_path}: {exc}")
+def all_up(states):
+    """Return True only when every tracked target has reached UP state."""
+    return all(s.state == "UP" for s in states.values())
 
 
-def emit_event(event: MonitorEvent, state: DeviceState, sink: EventSink) -> None:
-    extra = (
-        f"   downtime {format_duration(event.downtime_seconds)}"
-        if event.event == STATUS_UP and event.downtime_seconds > 0
-        else ""
-    )
-    print(
-        f"[{format_clock(event.timestamp)}] "
-        f"{color_status(event.event, 6)} {event.device.host:<28}{extra}"
-    )
+def show_summary(hosts, states, start_time):
+    """Print final host states, outage counts, downtime, and elapsed time."""
+    now = time.time()
+    print("\n" + "=" * 92)
+    print("UPGRADE MONITOR SUMMARY")
+    print("=" * 92)
+    print(f"{'DEVICE':<30}{'STATUS':<12}{'OUTAGES':<12}{'TOTAL DOWNTIME':<18}ADDRESS")
+    print("-" * 92)
 
-    if event.event == STATUS_DOWN:
-        write_log(sink, event.timestamp, f"DOWN {event.device.host} ({event.device.address})")
-    elif event.event == STATUS_UP:
-        downtime = (
-            f" downtime {format_duration(event.downtime_seconds)}"
-            if event.downtime_seconds > 0
-            else ""
-        )
-        write_log(sink, event.timestamp, f"UP {event.device.host} ({event.device.address}){downtime}")
-    write_csv_event(sink, event, state)
+    longest_host, longest_time = None, -1
+    for host in hosts:
+        state = states[host["address"]]
+        total = state.total_downtime
+        if state.state == "DOWN" and state.down_since:
+            total += now - state.down_since
 
+        if total > longest_time:
+            longest_host, longest_time = host["name"], total
 
-def current_status(state: DeviceState) -> str:
-    return state.state if state.state in {STATUS_UP, STATUS_DOWN} else STATUS_PENDING
-
-
-def count_states(states: dict[str, DeviceState]) -> dict[str, int]:
-    counts = {STATUS_UP: 0, STATUS_DOWN: 0, STATUS_PENDING: 0}
-    for state in states.values():
-        counts[current_status(state)] += 1
-    return counts
-
-
-def all_devices_up(states: dict[str, DeviceState]) -> bool:
-    return all(state.state == STATUS_UP for state in states.values())
-
-
-def effective_total_downtime(state: DeviceState, now: float) -> float:
-    if state.state == STATUS_DOWN and state.down_since is not None:
-        return state.total_downtime + max(0.0, now - state.down_since)
-    return state.total_downtime
-
-
-def effective_longest_outage(state: DeviceState, now: float) -> float:
-    current = max(0.0, now - state.down_since) if state.state == STATUS_DOWN and state.down_since else 0.0
-    return max(state.longest_outage, current)
-
-
-def show_cycle_summary(states: dict[str, DeviceState]) -> None:
-    counts = count_states(states)
-    print(
-        f"[{format_clock()}] {color_status(STATUS_UP)} {counts[STATUS_UP]} | "
-        f"{color_status(STATUS_DOWN)} {counts[STATUS_DOWN]} | "
-        f"{color_status(STATUS_PENDING)} {counts[STATUS_PENDING]}"
-    )
-
-
-def show_monitor_banner(devices: list[Device], config: MonitorConfig) -> None:
-    line = "=" * 78
-    print(color_text(line, Fore.CYAN))
-    print(color_text("pesping Upgrade Monitor", Fore.CYAN))
-    print(color_text(line, Fore.CYAN))
-    print()
-    print(color_text(f"[{format_clock()}] Monitoring {len(devices)} devices...", Fore.CYAN))
-    print()
-    print(f"Interval            : {format_value(config.interval)}s")
-    print(f"Timeout             : {format_value(config.timeout)}s")
-    print(f"Fail threshold      : {config.fail_threshold}")
-    print(f"Recovery threshold  : {config.recovery_threshold}")
-    if config.wait_for_up:
-        print("Auto stop           : wait for all devices UP")
-    elif config.stop_when_all_up:
-        print("Auto stop           : stop after confirmed DOWN and full recovery")
-    print()
-    print("Press Ctrl+C to stop.")
-    print()
-    print(color_text(line, Fore.CYAN))
-
-
-def show_summary(devices: list[Device], states: dict[str, DeviceState], started: float, ended: float) -> None:
-    line = "=" * 90
-    dash = "-" * 90
-    counts = count_states(states)
-    longest_device: Device | None = None
-    longest_seconds = 0.0
-
-    for device in devices:
-        seconds = effective_longest_outage(states[device.key], ended)
-        if seconds > longest_seconds:
-            longest_device = device
-            longest_seconds = seconds
-
-    print()
-    print(color_text(line, Fore.CYAN))
-    print(color_text("UPGRADE MONITOR SUMMARY", Fore.CYAN))
-    print(color_text(line, Fore.CYAN))
-    print()
-    print(f"{'DEVICE':<30} {'STATUS':<10} {'OUTAGES':<10} {'TOTAL DOWNTIME':<18} ADDRESS")
-    print(dash)
-
-    for device in devices:
-        state = states[device.key]
-        total = effective_total_downtime(state, ended)
+        color = GREEN if state.state == "UP" else RED if state.state == "DOWN" else YELLOW
         print(
-            f"{device.host:<30} {color_status(current_status(state), 10)} "
-            f"{state.outages:<10} {format_duration(total):<18} {device.address}"
+            f"{host['name']:<30}{color}{state.state:<12}{RESET}"
+            f"{state.outages:<12}{format_duration(total):<18}{host['address']}"
         )
 
-    print()
-    print(dash)
-    longest = f"{longest_device.host} - {format_duration(longest_seconds)}" if longest_device else "N/A"
-    print()
-    print(f"Devices         : {len(devices)}")
-    print(f"UP              : {counts[STATUS_UP]}")
-    print(f"DOWN            : {counts[STATUS_DOWN]}")
-    print(f"PENDING         : {counts[STATUS_PENDING]}")
-    print(f"Monitoring time : {format_duration(ended - started)}")
-    print(f"Longest outage  : {longest}")
-    print()
-    print(color_text(line, Fore.CYAN))
+    up, down, unknown = get_counts(states)
+    print("-" * 92)
+    print(f"Devices         : {len(hosts)}")
+    print(f"UP              : {GREEN}{up}{RESET}")
+    print(f"DOWN            : {RED}{down}{RESET}")
+    if unknown:
+        print(f"UNKNOWN         : {YELLOW}{unknown}{RESET}")
+    print(f"Monitoring time : {format_duration(now - start_time)}")
+    if longest_host:
+        print(f"Longest outage  : {longest_host} - {format_duration(longest_time)}")
+    print("=" * 92)
 
 
-def device_label(device: Device) -> str:
-    return f"{device.host} ({device.address})" if device.host != device.address else device.address
+# ============================================================================
+# CONTINUOUS MONITORING LOOP
+# ============================================================================
+def monitor_hosts(args, hosts):
+    """Monitor targets until interrupted or an enabled exit condition is met."""
+    start_time = time.time()
+    states = {host["address"]: DeviceState() for host in hosts}
+    seen_down = False
 
+    print("\n" + "=" * 78)
+    print(f"{CYAN}PESPING Upgrade Monitor{RESET}")
+    print("=" * 78)
+    print(f"[{timestamp()}] Monitoring {len(hosts)} devices...")
+    print(f"Interval            : {args.interval}s")
+    print(f"Timeout             : {args.timeout}s")
+    print(f"Fail threshold      : {args.fail_threshold}")
+    print(f"Recovery threshold  : {args.recovery_threshold}")
+    if args.log:
+        print(f"Log                 : {args.log}")
+    if args.csv:
+        print(f"CSV                 : {args.csv}")
+    if args.only_changes:
+        print("Display             : changes only")
+    print("\nPress Ctrl+C to stop.")
+    print("=" * 78 + "\n")
 
-def single_scan(devices: list[Device], timeout: float, workers: int) -> int:
-    results = ping_all(devices, timeout, workers)
-    reported_errors: set[str] = set()
-
-    for result in results:
-        if result.error and result.error not in reported_errors:
-            warn(result.error)
-            reported_errors.add(result.error)
-        status = STATUS_UP if result.success else STATUS_DOWN
-        print(f"{color_status(status, 6)} {device_label(result.device)}")
-
-    return 0 if all(result.success for result in results) else 1
-
-
-def monitor_hosts(devices: list[Device], config: MonitorConfig, sink: EventSink) -> int:
-    states = {device.key: DeviceState() for device in devices}
-    started = time.time()
-    interrupted = False
-    saw_confirmed_down = False
-    reported_errors: set[str] = set()
-
-    show_monitor_banner(devices, config)
     write_log(
-        sink,
-        started,
-        (
-            f"MONITOR START devices={len(devices)} interval={format_value(config.interval)} "
-            f"timeout={format_value(config.timeout)}"
-        ),
+        args.log,
+        f"MONITOR START devices={len(hosts)} interval={args.interval} timeout={args.timeout} "
+        f"fail_threshold={args.fail_threshold} recovery_threshold={args.recovery_threshold}",
     )
 
     try:
         while True:
-            cycle_started = time.time()
-            for result in ping_all(devices, config.timeout, config.workers):
-                if result.error and result.error not in reported_errors:
-                    warn(result.error)
-                    reported_errors.add(result.error)
+            cycle_start = time.time()
+            results = ping_all(hosts, args.timeout, args.workers)
 
-                state = states[result.device.key]
-                event = process_result(result, state, config)
-                if not event:
-                    continue
+            for host in hosts:
+                state = states[host["address"]]
+                if process_result(
+                    host, results.get(host["address"], False), state,
+                    args.fail_threshold, args.recovery_threshold, args.log, args.csv
+                ):
+                    seen_down = True
 
-                if event.event == STATUS_DOWN:
-                    saw_confirmed_down = True
-                emit_event(event, state, sink)
+            up, down, unknown = get_counts(states)
 
-            if not config.only_changes:
-                show_cycle_summary(states)
+            if not args.only_changes:
+                print(
+                    f"[{timestamp()}] {GREEN}UP {up}{RESET} | "
+                    f"{RED}DOWN {down}{RESET} | {YELLOW}PENDING {unknown}{RESET}"
+                )
 
-            if config.wait_for_up and all_devices_up(states):
-                print(color_text("ALL DEVICES ARE UP", Fore.CYAN))
-                write_log(sink, time.time(), "ALL DEVICES ARE UP")
-                break
+            if all_up(states):
+                if args.stop_when_all_up and seen_down:
+                    print(f"\n{GREEN}ALL DEVICES RECOVERED{RESET}")
+                    write_log(args.log, "ALL DEVICES RECOVERED")
+                    break
+                if args.wait_for_up and not args.stop_when_all_up:
+                    print(f"\n{GREEN}ALL DEVICES ARE UP{RESET}")
+                    write_log(args.log, "ALL DEVICES ARE UP")
+                    break
 
-            if config.stop_when_all_up and saw_confirmed_down and all_devices_up(states):
-                print(color_text("ALL DEVICES RECOVERED", Fore.CYAN))
-                write_log(sink, time.time(), "ALL DEVICES RECOVERED")
-                break
+            time.sleep(max(0, args.interval - (time.time() - cycle_start)))
 
-            sleep_for = config.interval - (time.time() - cycle_started)
-            if sleep_for > 0:
-                time.sleep(sleep_for)
     except KeyboardInterrupt:
-        interrupted = True
-        print()
-        print(color_text("Interrupted by user.", Fore.CYAN))
+        print(f"\n{YELLOW}Monitoring stopped by user.{RESET}")
+        write_log(args.log, "MONITOR STOPPED BY USER")
     finally:
-        ended = time.time()
-        write_log(sink, ended, "MONITOR END")
-        show_summary(devices, states, started, ended)
-
-    return 130 if interrupted else 0
+        show_summary(hosts, states, start_time)
+        write_log(args.log, "MONITOR END")
 
 
-def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
-    if args.timeout <= 0:
-        parser.error("--timeout must be greater than 0")
+# ============================================================================
+# ONE-TIME SCAN MODE
+# ============================================================================
+def single_scan(args, hosts):
+    """Run one concurrent probe cycle, filter output, and print scan totals."""
+    start = time.monotonic()
+    results = ping_all(hosts, args.timeout, args.workers)
+    print()
+
+    for host in hosts:
+        alive = results.get(host["address"], False)
+        if args.show == "up" and not alive or args.show == "down" and alive:
+            continue
+        if alive:
+            print(f"{GREEN}UP{RESET}     {host['name']:<30} {host['address']}")
+        else:
+            print(f"{RED}DOWN{RESET}   {host['name']:<30} {host['address']}")
+
+    up = sum(bool(results.get(host["address"], False)) for host in hosts)
+    down = len(hosts) - up
+    print("\n" + "=" * 78)
+    print("PING SCAN SUMMARY")
+    print("=" * 78)
+    print(f"Total IPs       : {len(hosts)}")
+    print(f"Reachable       : {GREEN}{up}{RESET}")
+    print(f"Unreachable     : {RED}{down}{RESET}")
+    print(f"Scan time       : {format_duration(time.monotonic() - start)}")
+    print("=" * 78)
+
+
+# ============================================================================
+# COMMAND-LINE INTERFACE
+# ============================================================================
+def parse_args(argv=None):
+    """Parse CLI options and reject invalid thresholds and worker limits."""
+    parser = argparse.ArgumentParser(
+        description=f"PESPING v{__version__} - Concurrent ICMP monitor and IPv4 scanner",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        epilog=(
+            "Examples:\n"
+            "  python pesping.py -ho 192.0.2.10\n"
+            "  python pesping.py -hf hosts.txt --monitor --only-changes\n"
+            "  python pesping.py -r 192.0.2.100-192.0.2.200\n"
+            "  python pesping.py -r 192.0.2.100-200 --show up\n"
+            "  python pesping.py -s 192.0.2.0/24 --show down\n"
+            "  python pesping.py -s 192.0.2.0/22 --monitor --workers 20\n"
+        ),
+    )
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("-hf", "--host_file", dest="host_file", metavar="FILE", help="File containing hosts or IPs")
+    source.add_argument("-ho", "--host", help="Single hostname or IP")
+    source.add_argument("-r", "--range", metavar="START-END", help="IPv4 range; full or abbreviated last octet")
+    source.add_argument("-s", "--subnet", metavar="CIDR", help="IPv4 subnet, e.g. 192.0.2.0/24")
+    parser.add_argument("--monitor", action="store_true", help="Enable continuous monitoring")
+    parser.add_argument("--interval", type=float, default=2, help="Seconds between cycles")
+    parser.add_argument("--timeout", type=float, default=1, help="ICMP timeout in seconds")
+    parser.add_argument("--fail-threshold", type=int, default=3, help="Failures required to declare DOWN")
+    parser.add_argument("--recovery-threshold", type=int, default=2, help="Replies required to declare UP")
+    parser.add_argument("--log", metavar="FILE", help="Save events to log file")
+    parser.add_argument("--csv", metavar="FILE", help="Save events to CSV")
+    parser.add_argument("--show", choices=("all", "up", "down"), default="all", help="Filter results for a single scan")
+    parser.add_argument("--only-changes", action="store_true", help="Show only state changes in monitor mode")
+    parser.add_argument("--wait-for-up", action="store_true", help="Exit when all devices are UP")
+    parser.add_argument("--stop-when-all-up", action="store_true", help="Exit after DOWN event and full recovery")
+    parser.add_argument("--workers", type=int, default=50, help="Maximum simultaneous ping workers")
+    parser.add_argument("--max-hosts", type=int, default=4096, help="Maximum target IPs (safety limit)")
+    args = parser.parse_args(argv)
     if args.interval <= 0:
         parser.error("--interval must be greater than 0")
+    if args.timeout <= 0:
+        parser.error("--timeout must be greater than 0")
     if args.fail_threshold < 1:
-        parser.error("--fail-threshold must be at least 1")
+        parser.error("--fail-threshold must be >= 1")
     if args.recovery_threshold < 1:
-        parser.error("--recovery-threshold must be at least 1")
+        parser.error("--recovery-threshold must be >= 1")
     if args.workers < 1:
-        parser.error("--workers must be at least 1")
-    if args.wait_for_up and args.stop_when_all_up:
-        parser.error("--wait-for-up and --stop-when-all-up cannot be used together")
+        parser.error("--workers must be >= 1")
+    if args.max_hosts < 1:
+        parser.error("--max-hosts must be >= 1")
+    if args.wait_for_up or args.stop_when_all_up:
+        args.monitor = True
+    return args, parser
 
 
-def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        prog="pesping.py",
-        description="Concurrent ping utility for network operations and upgrade monitoring.",
-    )
-    target = parser.add_mutually_exclusive_group(required=True)
-    target.add_argument("-ho", "--host", help="single host or IP address to ping")
-    target.add_argument("-f", "--file", help="file with HOST or HOST,ADDRESS entries")
-    target.add_argument(
-        "-s",
-        "--subnet",
-        metavar="SUBNET_OR_RANGE",
-        help="CIDR subnet or IPv4 range, e.g. 192.168.10.0/24 or 192.168.10.1-50",
-    )
-    parser.add_argument("--monitor", action="store_true", help="run continuous monitoring")
-    parser.add_argument("--interval", type=float, default=2, help="seconds between monitoring cycles")
-    parser.add_argument("--timeout", type=float, default=1, help="per-ping timeout in seconds")
-    parser.add_argument("--fail-threshold", type=int, default=3, help="consecutive failures before DOWN")
-    parser.add_argument("--recovery-threshold", type=int, default=2, help="consecutive successes before UP")
-    parser.add_argument("--workers", type=int, default=50, help="maximum concurrent ping workers")
-    parser.add_argument(
-        "--only-changes", action="store_true", help="print only state changes in monitor mode"
-    )
-    parser.add_argument("--log", help="write monitor events to a plain text log file")
-    parser.add_argument("--csv", help="write monitor events to a CSV file")
-    parser.add_argument("--wait-for-up", action="store_true", help="exit when every device is confirmed UP")
-    parser.add_argument(
-        "--stop-when-all-up",
-        action="store_true",
-        help="after at least one confirmed DOWN, exit when every device is UP",
-    )
-
-    args = parser.parse_args(argv)
-    validate_args(parser, args)
-    return args
-
-
-def load_devices(args: argparse.Namespace) -> tuple[list[Device], list[str]]:
-    if args.host:
-        return [device_from_host(args.host)], []
-    if args.subnet:
-        return load_subnet(args.subnet)
-    return load_hosts(args.file)
-
-
-def main(argv: list[str] | None = None) -> int:
-    colorama_init(autoreset=True)
-    args = parse_args(argv)
-
-    try:
-        devices, warnings = load_devices(args)
-    except ValueError as exc:
-        print(color_text(f"ERROR: {exc}", Fore.RED), file=sys.stderr)
-        return 2
-
-    for message in warnings:
-        warn(message)
-
-    should_monitor = args.monitor or args.wait_for_up or args.stop_when_all_up
-    if not should_monitor:
-        return single_scan(devices, args.timeout, args.workers)
-
-    sink = EventSink(log_path=normalize_path(args.log), csv_path=normalize_path(args.csv))
-    try:
-        prepare_output_files(sink)
-    except RuntimeError as exc:
-        print(color_text(f"ERROR: {exc}", Fore.RED), file=sys.stderr)
-        return 2
-
-    config = MonitorConfig(
-        interval=args.interval,
-        timeout=args.timeout,
-        fail_threshold=args.fail_threshold,
-        recovery_threshold=args.recovery_threshold,
-        workers=args.workers,
-        only_changes=args.only_changes,
-        wait_for_up=args.wait_for_up,
-        stop_when_all_up=args.stop_when_all_up,
-    )
-    return monitor_hosts(devices, config, sink)
+# ============================================================================
+# PROGRAM ENTRY POINT
+# ============================================================================
+def main():
+    """Select the input targets and dispatch to scan or monitoring mode."""
+    args, parser = parse_args()
+    hosts = load_targets(args, parser)
+    if args.monitor:
+        monitor_hosts(args, hosts)
+    else:
+        single_scan(args, hosts)
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()
