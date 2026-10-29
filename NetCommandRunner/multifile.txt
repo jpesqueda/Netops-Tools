@@ -1,0 +1,23 @@
+# Different commands for each device
+HostName:SW01
+show version
+show platform
+show module
+!
+
+HostName: SW02
+show environment all
+show interfaces status
+show vlan brief
+!
+
+HostName:SW03
+show ip interface brief
+show ip route
+wr
+!
+
+HostName:SW04
+show inventory
+show spanning-tree summary
+!

@@ -1,0 +1,4 @@
+# One device per line
+SW01
+SW02
+SW03

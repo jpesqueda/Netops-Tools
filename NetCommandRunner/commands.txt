@@ -1,0 +1,5 @@
+# Cisco IOS-XE commands
+show clock
+show version
+wr
+show startup-config
