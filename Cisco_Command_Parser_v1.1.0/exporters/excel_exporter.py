@@ -1,3 +1,67 @@
+"""Excel exporter using openpyxl (compatible with native Windows Python).
+
+Every parsed command is written to its own worksheet. All raw outputs are
+retained in Raw_Commands up to Excel's 32767-character per-cell limit.
+"""
+from __future__ import annotations
+
+import json
+import re
+from pathlib import Path
+
+from openpyxl import Workbook
+from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.table import Table, TableStyleInfo
+
+MAX_EXCEL_CELL = 32767
+HEADER_FILL = PatternFill('solid', fgColor='17365D')
+HEADER_FONT = Font(color='FFFFFF', bold=True)
+
+
+def safe_cell(value):
+    """Make parsed data safe for Excel cells without executing formulas."""
+    if isinstance(value, (dict, list, tuple)):
+        value = json.dumps(value, ensure_ascii=False, default=str)
+    if value is None:
+        return None
+    if isinstance(value, (int, float, bool)):
+        return value
+    text = str(value).replace('\x00', '')[:MAX_EXCEL_CELL]
+    if text.lstrip().startswith(('=', '+', '-', '@')):
+        text = "'" + text[:MAX_EXCEL_CELL - 1]
+    return text
+
+
+def excel_export(path, device, blocks, parsed, master, summary):
+    """Generate a multi-sheet audit workbook; returns its output path."""
+    wb = Workbook()
+    wb.remove(wb.active)
+    names_used = set()
+    sheet_number = 0
+
+    def add_sheet(name, rows, columns=None):
+        nonlocal sheet_number
+        name = re.sub(r'[\\/*?:\[\]]', '_', name)[:31]
+        base = name
+        suffix = 2
+        while name.casefold() in names_used:
+            ext = f'_{suffix}'
+            name = base[:31 - len(ext)] + ext
+            suffix += 1
+        names_used.add(name.casefold())
+        ws = wb.create_sheet(name)
+        rows = list(rows)
+        if columns is None:
+            columns = list(dict.fromkeys(key for row in rows for key in row.keys())) or ['Info']
+        ws.append([str(col) for col in columns])
+        for entry in rows:
+            ws.append([safe_cell(entry.get(col)) for col in columns])
+
+        ws.freeze_panes = 'A2'
+        ws.sheet_view.showGridLines = False
+        ws.row_dimensions[1].height = 27
+        for cell in ws[1]:
             cell.fill = HEADER_FILL
             cell.font = HEADER_FONT
             cell.alignment = Alignment(vertical='center')
