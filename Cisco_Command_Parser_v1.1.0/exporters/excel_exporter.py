@@ -1,42 +1,45 @@
-"""Excel export built with artifact_tool, Windows-compatible Python."""
-from artifact_tool import Workbook,SpreadsheetFile
-import re
+            cell.fill = HEADER_FILL
+            cell.font = HEADER_FONT
+            cell.alignment = Alignment(vertical='center')
 
-def excel_export(path,device,blocks,parsed,master,summary):
-    wb=Workbook.create();used=set()
-    def tab(name,rows,columns=None):
-        safe=re.sub(r'[\\/*?:\[\]]','_',name)[:31]
-        base=safe;n=2
-        while safe.lower() in used:
-            suffix=f'_{n}';safe=base[:31-len(suffix)]+suffix;n+=1
-        used.add(safe.lower())
-        sheet=wb.worksheets.add(safe)
-        if not columns:
-            columns=list(dict.fromkeys(k for row in rows for k in row.keys())) if rows else ['Info']
-        matrix=[columns]+[[safe_cell(row.get(c)) for c in columns] for row in rows]
-        # Excel limits 32,767 chars per cell; keep raw output in JSON/TXT if longer.
-        rng=sheet.get_range_by_indexes(0,0,len(matrix),len(columns));rng.values=matrix
-        head=sheet.get_range_by_indexes(0,0,1,len(columns))
-        head.format={'fill':'#17365D','font':{'bold':True,'color':'#FFFFFF'},'row_height':28,'vertical_alignment':'center'}
-        sheet.freeze_panes.freeze_rows(1)
+        for col_idx, col_name in enumerate(columns, start=1):
+            sample = [str(col_name)]
+            sample.extend(str(ws.cell(row_idx, col_idx).value or '')[:100]
+                          for row_idx in range(2, min(ws.max_row, 201) + 1))
+            width = max(13, min(45, max(len(line.split('\n')[0]) for line in sample) + 3))
+            ws.column_dimensions[get_column_letter(col_idx)].width = width
+
         if rows:
-            try:sheet.tables.add(sheet.get_range_by_indexes(0,0,len(matrix),len(columns)),True,'T'+str(len(used)).zfill(3))
-            except Exception:pass
-        for col in range(len(columns)):
-            longest=max((len(str(row[col] or '')) for row in matrix[:201]),default=16)
-            sheet.get_range_by_indexes(0,col,len(matrix),1).format.column_width=max(13,min(longest+3,45))
-        return sheet
-    info=device or {}
-    tab('Device_Summary',[{'hostname':info.get('hostname'),'model':info.get('model'),'serial':info.get('serial'),'version':info.get('version'),'uptime':info.get('uptime'),'image':info.get('image'),'commands_found':len(blocks),'parsed_commands':sum(s['status']=='PARSED' for s in summary)}])
-    tab('Parsing_Summary',summary,['command','status','records','error'])
-    tab('Interfaces_Master',master)
-    for cmd,rows in parsed.items():tab(cmd,rows)
-    tab('Raw_Commands',[{'command':b['command'],'status':b['status'],'records':b['records'],'raw_output':b['raw_output']} for b in blocks],['command','status','records','raw_output'])
-    SpreadsheetFile.export_xlsx(wb).save(str(path))
+            sheet_number += 1
+            table_ref = f'A1:{get_column_letter(len(columns))}{ws.max_row}'
+            table = Table(displayName=f'AuditTable{sheet_number:03d}', ref=table_ref)
+            table.tableStyleInfo = TableStyleInfo(
+                name='TableStyleMedium2', showFirstColumn=False,
+                showLastColumn=False, showRowStripes=True, showColumnStripes=False,
+            )
+            ws.add_table(table)
+        else:
+            ws.auto_filter.ref = f'A1:{get_column_letter(len(columns))}1'
+        return ws
 
-def safe_cell(value):
-    if isinstance(value,(dict,list)):return str(value)
-    if isinstance(value,str):
-        value=value[:32750]
-        if value.startswith(('=','+','-','@')):return "'"+value
-    return value
+    info = device or {}
+    add_sheet('Device_Summary', [{
+        'hostname': info.get('hostname'), 'model': info.get('model'),
+        'serial': info.get('serial'), 'version': info.get('version'),
+        'uptime': info.get('uptime'), 'image': info.get('image'),
+        'commands_found': len(blocks),
+        'parsed_commands': sum(s['status'] == 'PARSED' for s in summary),
+    }])
+    add_sheet('Parsing_Summary', summary, ['command', 'status', 'records', 'error'])
+    add_sheet('Interfaces_Master', master)
+    for command, rows in parsed.items():
+        add_sheet(command, rows)
+    add_sheet('Raw_Commands', [
+        {'command': b['command'], 'status': b['status'], 'records': b['records'],
+         'raw_output': b['raw_output']}
+        for b in blocks
+    ], ['command', 'status', 'records', 'raw_output'])
+
+    path = Path(path)
+    wb.save(path)
+    return path
