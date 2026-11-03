@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Catalyst Config Auditor v1.3.5 — standalone read-only collector, Excel, YAML and Jinja2 renderer.
+"""Catalyst Config Auditor v1.3.7 — standalone read-only collector, Excel, YAML and Jinja2 renderer.
 
-Dependencies: pip install netmiko pyyaml jinja2
+Base dependencies: pip install netmiko pyyaml jinja2
+Optional Excel parsers: pip install ttp; Genie/pyATS only on supported Linux/macOS.
 Excel output is implemented with Python's standard-library ZIP/XML writer (no Excel package).
 Python 3.10+. Never sends configuration commands. Treat backups as sensitive.
 """
@@ -18,12 +19,14 @@ import sys
 import traceback
 import json
 import logging
+import os
+import importlib.util
 from xml.sax.saxutils import escape as xml_escape
 from zipfile import ZipFile, ZIP_DEFLATED
 import yaml
 from jinja2 import Environment, FileSystemLoader, DictLoader, ChoiceLoader, StrictUndefined, TemplateError
 
-__version__ = '1.3.5'
+__version__ = '1.3.7'
 VERSION = __version__
 DEFAULT_COMMANDS = ['show version', 'show inventory', 'show switch', 'show interfaces status',
                     'show ip interface brief', 'show ip bgp summary']
@@ -37,7 +40,7 @@ DEFAULT_SELECTION = {
   'routed_interfaces': {'enabled': True, 'include_all': True},
   'bgp': {'enabled': True, 'fields': ['asn','router_id','neighbors'], 'include_passwords': True},
   'interfaces': {'enabled': True, 'mode': 'access',
-                 'fields': ['name','access_vlan','voice_vlan','description','mode','arp_trust'],
+                 'fields': ['name','access_vlan','voice_vlan','description','mode','arp_trust','arp_limit_rate'],
                  'arp_inspection': True, 'include_dai_interfaces': True, 'compact': False},
   'ntp': {'enabled': False}, 'tacacs': {'enabled': False}, 'ospf': {'enabled': False}
  }
@@ -50,6 +53,11 @@ EXAMPLES = """EXAMPLES:
   python Catalyst_Config_Auditor.py -hf hosts.txt --vars
   python Catalyst_Config_Auditor.py --vars --from-config Running_Config.txt
   python Catalyst_Config_Auditor.py -ho SW01 --excel
+  python Catalyst_Config_Auditor.py -ho SW01 --excel --parser auto
+  python Catalyst_Config_Auditor.py -ho SW01 --excel --parser ttp --parser-dir Custom_Parsers/TTP
+  python Catalyst_Config_Auditor.py --parser-check
+  python Catalyst_Config_Auditor.py --parser-test "show ip arp" --input arp.txt --parser ttp
+  python Catalyst_Config_Auditor.py --parser-test "show interfaces trunk" --input trunk.txt --parser custom
   python Catalyst_Config_Auditor.py --create
   python Catalyst_Config_Auditor.py --create --template
   python Catalyst_Config_Auditor.py --create --template output/SW01/Variables/template_main.j2
@@ -77,11 +85,17 @@ MODES:
             Never sends changes to a device.
   -AIO: online collect then offline variable extraction.
   BGP: one simplified neighbor list; IPv4 activation IPs reference that list.
-  DAI: one boolean arp_trust per port; editable generic interface template
-       emits trust when true and limit rate 150 otherwise (new standard).
+  DAI: arp_trust: true and arp_limit_rate: N are extracted ONLY when the
+       corresponding positive commands exist. Both settings are independent.
+       No defaults are injected into the generated interface template.
   BGP: one compact neighbor list, with optional ipv4_activate for AF context.
   IPv4: secondary is emitted only when true; primary IPs have ip and mask only.
-  EXCEL: counters and known tables become columns; unknown output uses Line + Raw output.
+  EXCEL: Genie/TTP (optional) -> legacy custom -> RAW; no template means no data loss.
+         Parsing_Summary worksheet shows engine and status for each command.
+  PARSERS: auto uses TTP first on native Windows; Genie first elsewhere.
+           Genie is not officially supported on Windows by Cisco.
+           TTP templates are optional .ttp files named for the show command.
+           --parser-test validates an existing output file without SSH.
 LOGS:
   Per-device timestamped detail logs in output/Logs_<hostname>/.
   Only a concise progress summary appears on the console.
@@ -106,6 +120,19 @@ def cli(argv=None):
     p.add_argument('--interface-vars',help='Optional extra interface YAML file (legacy support)')
     p.add_argument('--backup',action='store_true',help='Alias for --collect (online)')
     p.add_argument('--excel',action='store_true',help='Regenerate XLSX from local Commands_Output.txt (offline)')
+    p.add_argument('--parser',choices=['auto','genie','ttp','custom','raw'],default='auto',
+                   help='Excel parser engine (default: auto; on Windows TTP > custom > RAW)')
+    p.add_argument('--parser-dir',default='Custom_Parsers/TTP',metavar='DIR',
+                   help='Folder holding .ttp templates (default: Custom_Parsers/TTP)')
+    p.add_argument('--parser-test',metavar='COMMAND',
+                   help='Offline test parser for a single CLI command; requires --input')
+    p.add_argument('--parser-check',action='store_true',
+                   help='Display optional parser dependency status and installed TTP templates')
+    p.add_argument('--input',metavar='FILE',help='Saved CLI output for --parser-test')
+    p.add_argument('--ttp-template',metavar='FILE',
+                   help='Explicit .ttp template for --parser-test (overrides --parser-dir)')
+    p.add_argument('--json-output',metavar='FILE',
+                   help='Save --parser-test structured result as JSON')
     p.add_argument('--yaml',action='store_true',help='Alias for --vars (offline)')
     
     p.add_argument('--cmd-file',help='Command list for --excel; asks interactively when omitted (default cmd.txt)')
@@ -124,11 +151,21 @@ def cli(argv=None):
     if args.aio: args.collect=True; args.vars=True
     if args.backup: args.collect=True
     if args.yaml: args.vars=True
-    if not (args.collect or args.vars or args.excel or args.create_config):
-        p.error('Choose --collect, --vars, --excel, --create or -AIO')
+    if not (args.collect or args.vars or args.excel or args.create_config or args.parser_test or args.parser_check):
+        p.error('Choose --collect, --vars, --excel, --create, --parser-test, --parser-check or -AIO')
+    if args.parser_test and args.parser_check:
+        p.error('Choose --parser-test or --parser-check, not both')
+    if (args.parser_test or args.parser_check) and (args.collect or args.vars or args.excel or args.create_config):
+        p.error('--parser-test and --parser-check are standalone offline modes')
+    if args.parser_test and not args.input:
+        p.error('--parser-test requires --input FILE')
+    if args.ttp_template and not args.parser_test:
+        p.error('--ttp-template is only supported with --parser-test')
+    if args.json_output and not args.parser_test:
+        p.error('--json-output is only supported with --parser-test')
     if args.create_config and (args.collect or args.vars or args.excel):
         p.error('--create is a standalone offline mode')
-    if not args.create_config and not (args.host or args.host_file or args.from_config):
+    if not (args.create_config or args.parser_test or args.parser_check) and not (args.host or args.host_file or args.from_config):
         p.error('Provide -ho, -hf or --from-config')
     if args.collect and args.from_config:
         p.error('--collect requires a hostname; use --vars --from-config for offline files')
@@ -310,7 +347,13 @@ def config_extract(config, facts, selection):
         if arp_present:explicit_dai_interfaces.add(name)
         it={'name':name,'description':description,'shutdown':True if 'shutdown' in ch else False if 'no shutdown' in ch else None,
             'ip_addresses':parse_ip_lines(ch),'access_vlan':data,'voice_vlan':voice,'mode':mode,
-            'arp_trust':bool(arp['trust'])}
+            }
+        # Export only commands that actually exist in this interface stanza.
+        # Do not synthesize false values or a rate-limit default.
+        if arp['trust']:
+            it['arp_trust'] = True
+        if arp['limit_rate'] is not None:
+            it['arp_limit_rate'] = arp['limit_rate']
         iface_data.append(it)
     def enabled(key):
         item=selection.get(key,{})
@@ -337,14 +380,18 @@ def config_extract(config, facts, selection):
                         (include_dai and i['name'] in explicit_dai_interfaces)]
         elif mode!='all':raise ValueError("interfaces.mode must be 'access' or 'all'")
         fields=cfg.get('fields',['name','access_vlan','voice_vlan','description'])
-        # Older selection YAML used 'arp_inspection' for a detailed mapping.
-        # v1.3.5 deliberately exports a single boolean instead.
+        # Backward compatible: older selection files may still list
+        # 'arp_inspection'. Map it to the supported explicit DAI fields.
         if fields:
-            fields=['arp_trust' if k=='arp_inspection' else k for k in fields]
+            expanded=[]
+            for field in fields:
+                expanded.extend(('arp_trust','arp_limit_rate') if field=='arp_inspection' else (field,))
+            fields=list(dict.fromkeys(expanded))
         if fields and include_arp:
-            fields=list(dict.fromkeys([*fields,'arp_trust','mode']))
+            fields=list(dict.fromkeys([*fields,'arp_trust','arp_limit_rate','mode']))
         if not include_arp:
-            candidates=[{k:v for k,v in item.items() if k!='arp_trust'} for item in candidates]
+            candidates=[{k:v for k,v in item.items()
+                         if k not in ('arp_trust','arp_limit_rate')} for item in candidates]
         candidates=[field_filter(i,fields) for i in candidates]
         if cfg.get('compact',False):
             # Only known explicitly configured values are eligible for a common default.
@@ -506,6 +553,55 @@ def parse_counter_tables(output):
     return headers,[[port]+[values.get(h,'') for h in headers[1:]] for port,values in rows.items()]
 
 
+def parse_trunk_sections(output):
+    """Merge the four common IOS-XE trunk sections by interface.
+
+    Unlike a generic fixed-width parser, this does not silently export only
+    the last trunk section. If a known section is malformed, return None so
+    the caller retains RAW instead of inventing rows.
+    """
+    headers=['Port','Mode','Encapsulation','Status','Native_VLAN',
+             'Vlans_Allowed','Vlans_Active','Vlans_STP_Forwarding']
+    sections={}
+    active=None
+    saw_header=False
+    errors=[]
+    known_sections={'base','allowed','active','forwarding'}
+    for raw in output.splitlines():
+        line=raw.strip()
+        if not line:continue
+        if re.match(r'^Port\s+',line,re.I):
+            lower=line.lower()
+            if 'encapsulation' in lower and 'native vlan' in lower:active='base'
+            elif 'vlans allowed and active' in lower:active='active'
+            elif 'vlans allowed on trunk' in lower:active='allowed'
+            elif 'vlans in spanning tree forwarding' in lower:active='forwarding'
+            else:active=None;errors.append('Unknown Port section')
+            saw_header=True
+            continue
+        if active is None:continue
+        parts=line.split()
+        if not parts or not re.match(r'^(?:Gi|Te|Twe|Fo|Hu|Fa|Eth|Po|Port-channel)\S+',parts[0],re.I):continue
+        port=parts[0]
+        if active=='base':
+            if len(parts)!=5:errors.append(f'Unexpected trunk row: {port}');continue
+            fields=['Mode','Encapsulation','Status','Native_VLAN']
+            values=parts[1:]
+        else:
+            if len(parts)!=2:errors.append(f'Unexpected trunk VLAN row: {port}');continue
+            fields=[{'allowed':'Vlans_Allowed','active':'Vlans_Active','forwarding':'Vlans_STP_Forwarding'}[active]]
+            values=parts[1:]
+        item=sections.setdefault(port,{'Port':port,'seen':set()})
+        if active in item['seen']:errors.append(f'Duplicate {active} section: {port}')
+        item['seen'].add(active)
+        item.update(zip(fields,values))
+    if not saw_header or errors or not sections:return None
+    # A section may legitimately contain fewer active trunks, but each port
+    # must be represented in the base section to safely merge attributes.
+    if any('base' not in data['seen'] for data in sections.values()):return None
+    return headers,[[row.get(k,'') for k in headers] for row in sections.values()]
+
+
 def generic_fixed_width_table(output):
     """Return a CLI table only when column boundaries are unambiguous.
 
@@ -538,6 +634,10 @@ def generic_fixed_width_table(output):
 def command_table(command,output):
     """Structured parser -> guarded generic parser -> lossless 2-column RAW."""
     c=re.sub(r'\s+',' ',command.lower().strip())
+    if c in ('show interfaces trunk','sh interfaces trunk','show interface trunk'):
+        parsed=parse_trunk_sections(output)
+        if parsed:return parsed
+        return ['Line','Raw output'],[[i,line] for i,line in enumerate(output.splitlines(),1)]
     if c in ('show ip interface brief','sh ip interface brief'):
         entries=[]
         for line in output.splitlines():
@@ -588,6 +688,243 @@ def command_table(command,output):
     # Other IOS-XE commands are not necessarily tables (e.g. show running).
     # Return separate Excel columns for line number and exact text.
     return ['Line','Raw output'],[[i,line] for i,line in enumerate(output.splitlines(),1)] or [[1,'(empty output)']]
+
+# -------------------- OPTIONAL SHOW PARSERS: GENIE / TTP --------------------
+# Imports are intentionally lazy. Offline --vars and --create never require
+# Cisco/pyATS libraries. No SSH is performed during offline parser execution.
+
+
+def normalize_show_command(command):
+    """Normalize show aliases solely for locating local templates."""
+    name=re.sub(r'\s+', ' ', command.strip().lower())
+    if name.startswith('sh '):name='show '+name[3:]
+    name=name.replace('show interface status','show interfaces status')
+    return name
+
+
+def parser_template_roots(parser_dir):
+    """Search current working directory first, then beside this script."""
+    base=Path(parser_dir).expanduser()
+    if base.is_absolute():return [base]
+    roots=[Path.cwd()/base,Path(__file__).resolve().parent/base]
+    unique=[]
+    for root in roots:
+        if root not in unique:unique.append(root)
+    return unique
+
+
+def find_ttp_template(command, parser_dir, explicit=None):
+    if explicit:
+        path=Path(explicit).expanduser()
+        if not path.is_file():raise FileNotFoundError(f'TTP template not found: {path}')
+        return path
+    slug=re.sub(r'[^a-z0-9]+','_',normalize_show_command(command)).strip('_')
+    for root in parser_template_roots(parser_dir):
+        for name in (slug+'.ttp','cisco_ios_'+slug+'.ttp'):
+            candidate=root/name
+            if candidate.is_file():return candidate
+    return None
+
+
+def clean_parser_result(value):
+    """Reject empty match objects and None results before marking a parse PASS."""
+    if isinstance(value,dict):
+        result={str(k):clean_parser_result(v) for k,v in value.items()}
+        return {k:v for k,v in result.items() if v is not None and v != {} and v != []}
+    if isinstance(value,(list,tuple)):
+        result=[clean_parser_result(v) for v in value]
+        return [v for v in result if v is not None and v != {} and v != []]
+    if value is None:return None
+    if isinstance(value,str) and not value.strip():return None
+    return value
+
+
+def compact_cell(value):
+    if value is None:return ''
+    if isinstance(value,(dict,list,tuple)):return json.dumps(value,ensure_ascii=False,default=str,sort_keys=True)
+    return value
+
+
+def structured_to_table(parsed, max_records=30000, max_columns=180):
+    """Convert arbitrarily nested Genie/TTP mappings to loss-aware Excel rows.
+
+    A Path column retains the original nested dictionary keys and list indexes
+    so information is not silently merged across interfaces, neighbors or VRFs.
+    Nested scalar context is inherited by child rows. Unknown values are not
+    coerced to zero/empty. For runaway data, fail over to custom/RAW parsing.
+    """
+    cleaned=clean_parser_result(parsed)
+    if cleaned is None or cleaned=={} or cleaned==[]:return None
+    items=[]
+    def walk(node,path,context):
+        if len(items)>=max_records:raise ValueError('Structured output exceeds row limit')
+        if isinstance(node,dict):
+            scalar={str(k):compact_cell(v) for k,v in node.items()
+                    if not isinstance(v,(dict,list,tuple)) or
+                       (isinstance(v,(list,tuple)) and all(not isinstance(x,(dict,list,tuple)) for x in v))}
+            children={str(k):v for k,v in node.items() if str(k) not in scalar}
+            next_context=dict(context)
+            next_context.update(scalar)
+            if children:
+                for k,v in children.items():walk(v,path+[k],next_context)
+            elif scalar:
+                row=dict(next_context);row['Path']='/'.join(path) if path else 'root'
+                items.append(row)
+        elif isinstance(node,(list,tuple)):
+            for idx,val in enumerate(node):walk(val,path+[str(idx)],context)
+        elif node is not None:
+            row=dict(context);row['Path']='/'.join(path) if path else 'root';row['value']=compact_cell(node)
+            items.append(row)
+    walk(cleaned,[],{})
+    if not items:return None
+    keys=['Path']
+    for record in items:
+        for key in record:
+            if key not in keys:keys.append(key)
+            if len(keys)>max_columns:raise ValueError('Structured output exceeds column limit')
+    return keys,[[record.get(k,'') for k in keys] for record in items]
+
+
+def _genie_offline(command,output):
+    """Use Cisco's documented offline Device.parse(command, output=...) API.
+
+    Genie/pyATS is not officially supported on Windows; caller handles failure
+    and retains the original output without hiding an import/runtime error.
+    """
+    from genie.conf.base import Device
+    from genie.libs.parser.utils import get_parser
+    from pyats.datastructures import AttrDict
+    errors=[]
+    for device_os in ('iosxe','ios'):
+        try:
+            device=Device('offline_catalyst',os=device_os)
+            device.custom.setdefault('abstraction',{})['order']=['os']
+            device.cli=AttrDict({'execute':None})
+            get_parser(command,device)
+            parsed=device.parse(command,output=output)
+            if parsed and isinstance(parsed,(dict,list,tuple)):return parsed
+            errors.append(f'{device_os}: empty parsing result')
+        except Exception as exc:
+            errors.append(f'{device_os}: {type(exc).__name__}')
+    raise ValueError('Genie parser unavailable or incompatible ('+', '.join(errors)+')')
+
+
+def _ttp_offline(output,template_path):
+    """Run one custom TTP template against saved text (no device connection)."""
+    from ttp import ttp
+    parser=ttp(data=output,template=str(template_path),log_level='ERROR')
+    parser.parse(one=True)
+    return parser.result(structure='flat_list')
+
+
+def is_raw_table(headers):
+    return list(headers)==['Line','Raw output']
+
+
+def table_from_engine(command, output, args, logger=None):
+    """Return (headers, rows, engine, status, note) with RAW as final fallback.
+
+    `auto`: TTP then custom on Windows; Genie then TTP then custom elsewhere.
+    No output is discarded: RAW fallback contains all original lines, and the
+    original Commands_Output.txt is preserved for audits/re-parsing.
+    """
+    requested=getattr(args,'parser','auto')
+    failures=[]
+    if not output.strip():
+        return ['Line','Raw output'],[[1,'(empty output)']],'RAW','EMPTY','No saved CLI output'
+    if requested=='raw':
+        return ['Line','Raw output'],[[i,line] for i,line in enumerate(output.splitlines(),1)],'RAW','RAW','Raw selected'
+    if requested=='auto':
+        order=['ttp'] if os.name=='nt' else ['genie','ttp']
+        order.append('custom')
+    elif requested in ('genie','ttp'):
+        order=[requested]
+    else:order=['custom']
+    for engine in order:
+        try:
+            if engine=='genie':
+                if os.name=='nt' and requested=='auto':
+                    failures.append('Genie: Windows (skipped)')
+                    continue
+                # Lightweight check prevents repeated expensive ImportError per command.
+                if importlib.util.find_spec('genie') is None:
+                    failures.append('Genie: not installed')
+                    continue
+                parsed=_genie_offline(command,output)
+                table=structured_to_table(parsed)
+                if table:
+                    headers,rows=table
+                    return headers,rows,'GENIE','PARSED','Offline Genie/pyATS'
+            elif engine=='ttp':
+                template=find_ttp_template(command,getattr(args,'parser_dir','Custom_Parsers/TTP'),
+                                           getattr(args,'ttp_template',None))
+                if template is None:
+                    failures.append('TTP: no local template')
+                    continue
+                if importlib.util.find_spec('ttp') is None:
+                    failures.append('TTP: not installed')
+                    continue
+                parsed=_ttp_offline(output,template)
+                table=structured_to_table(parsed)
+                if table:
+                    headers,rows=table
+                    return headers,rows,'TTP','PARSED',f'Template: {template.name}'
+                failures.append('TTP: no matched records')
+            elif engine=='custom':
+                headers,rows=command_table(command,output)
+                if not is_raw_table(headers):
+                    return headers,rows,'CUSTOM','PARSED','Built-in Python parser'
+                failures.append('Custom: no structured table')
+        except Exception as exc:
+            failures.append(f'{engine.upper()}: {type(exc).__name__}: {str(exc)[:100]}')
+            if logger:logger.warning('Parser for %s: %s failure (%s)',command,engine,type(exc).__name__)
+    note='; '.join(failures)[:450] or 'No matching parser'
+    return (['Line','Raw output'],
+            [[i,line] for i,line in enumerate(output.splitlines(),1)],
+            'RAW','FALLBACK',note)
+
+
+def parser_check(args):
+    banner('PARSER CHECK')
+    for label,module in (('TTP','ttp'),('Genie','genie')):
+        try:ok=importlib.util.find_spec(module) is not None
+        except (ImportError,ValueError):ok=False
+        print(f'    {label:<12}: {"DETECTED" if ok else "NOT INSTALLED"}')
+    if os.name=='nt':print('    Genie note   : Cisco does not officially support Genie/pyATS on Windows')
+    roots=parser_template_roots(args.parser_dir)
+    found={str(p.resolve()) for r in roots if r.is_dir() for p in r.glob('*.ttp')}
+    print(f'    TTP templates: {len(found)}')
+    for filename in sorted(found):print('      - '+filename)
+    print('    Custom/RAW  : AVAILABLE (built into this script)')
+    return 0
+
+
+def parser_test(args):
+    banner('OFFLINE PARSER TEST')
+    source=Path(args.input).expanduser()
+    if not source.is_file():raise FileNotFoundError(f'CLI output not found: {source}')
+    output=source.read_text(encoding='utf-8-sig',errors='replace')
+    headers,rows,engine,status,note=table_from_engine(args.parser_test,output,args)
+    print(f'    Command     : {args.parser_test}')
+    print(f'    Source      : {source}')
+    print(f'    Engine      : {engine}')
+    print(f'    Status      : {status}')
+    print(f'    Records     : {len(rows)}')
+    print(f'    Columns     : {len(headers)}')
+    print(f'    Details     : {note}')
+    print('    Headers     : '+', '.join(headers[:15]))
+    if args.json_output:
+        result={'command':args.parser_test,'parser':engine,'status':status,
+                'details':note,'headers':headers,'records':[dict(zip(headers,row)) for row in rows]}
+        dest=Path(args.json_output).expanduser()
+        save_text(dest,json.dumps(result,ensure_ascii=False,indent=2,default=str)+'\n',args.overwrite)
+        print(f'    JSON saved  : {dest.resolve()}')
+    else:
+        print('    Preview (up to 3 records):')
+        for row in rows[:3]:
+            text=json.dumps(dict(zip(headers,row)),ensure_ascii=False,default=str)
+            print('      '+(text[:250]+'...' if len(text)>250 else text))
+    return 0 if status=='PARSED' else 1
 
 def sample_jinja(data):
     """Starter template based solely on the extracted and selected fields.
@@ -663,11 +1000,12 @@ def running_config_jinja(config, data, interface_data):
                     replace=f' switchport access vlan {{{{ interfaces[{idx}].access_vlan }}}}'
                 elif re.fullmatch(r'switchport voice vlan\s+\d+',stripped) and item.get('voice_vlan') is not None:
                     replace=f' switchport voice vlan {{{{ interfaces[{idx}].voice_vlan }}}}'
-                elif re.fullmatch(r'(?:no )?ip arp inspection trust|ip arp inspection limit (?:none|rate\s+\d+(?:\s+burst\s+interval\s+\d+)?)',stripped,re.I) and 'arp_trust' in item:
-                    # Source template follows the simplified v1.3.5 policy.
-                    path=f'interfaces[{idx}].arp_trust'
-                    replace=('{% if '+path+' %}ip arp inspection trust'
-                             '{% else %}ip arp inspection limit rate 150{% endif %}')
+                elif re.fullmatch(r'ip arp inspection trust',stripped,re.I) and item.get('arp_trust') is True:
+                    # A trust line may exist without a rate-limit line.
+                    replace='{% if interfaces['+str(idx)+'].arp_trust | default(false) %}ip arp inspection trust{% endif %}'
+                elif re.fullmatch(r'ip arp inspection limit rate\s+\d+',stripped,re.I) and item.get('arp_limit_rate') is not None:
+                    # Preserve the rate read from this interface; never set 150 by default.
+                    replace='ip arp inspection limit rate {{ interfaces['+str(idx)+'].arp_limit_rate }}'
             for field in ('svis','loopback_interfaces','routed_interfaces'):
                 idx=sections[field].get(current_iface)
                 if idx is None:continue
@@ -805,7 +1143,7 @@ def split_template(full, interface_template_name='template_interfaces.j2'):
 
 
 def generic_interface_template(original_interface_blocks='', interface_data=None):
-    """Editable Jinja baseline: simple VLAN/description + trusted-or-rate150 DAI.
+    """Editable Jinja baseline: simple VLAN/description + explicit DAI only.
 
     Access ports are generated from interface YAML, never synthesized from a
     presumed 24/48-port model. Non-access interfaces require a dedicated
@@ -827,8 +1165,9 @@ interface {{ intf.name }}
 {% endif %}
 {% if intf.arp_trust | default(false) %}
  ip arp inspection trust
-{% else %}
- ip arp inspection limit rate 150
+{% endif %}
+{% if intf.arp_limit_rate | default(none) is not none %}
+ ip arp inspection limit rate {{ intf.arp_limit_rate }}
 {% endif %}
 !
 {% endif %}
@@ -1019,8 +1358,9 @@ def offline_vars(args,target,selection):
         logger.info('Descriptions: %d',sum(bool(x.get('description')) for x in interface_data['interfaces']))
         logger.info('Data VLANs: %d',sum(x.get('access_vlan') is not None for x in interface_data['interfaces']))
         logger.info('Voice VLANs: %d',sum(x.get('voice_vlan') is not None for x in interface_data['interfaces']))
-        logger.info('DAI trust interfaces: %d | Other interfaces use rate limit 150 in the generic template',
-                    sum(bool(x.get('arp_trust')) for x in interface_data['interfaces']))
+        logger.info('DAI explicit trust lines: %d | Explicit rate-limit lines: %d | Neither command is added by default',
+                    sum(x.get('arp_trust') is True for x in interface_data['interfaces']),
+                    sum('arp_limit_rate' in x for x in interface_data['interfaces']))
         if data.get('bgp',{}).get('enabled'):
             logger.info('BGP neighbors: %d | IPv4 AF activated: %d',
                         len(data['bgp'].get('neighbors',[])),
@@ -1066,12 +1406,19 @@ def save_workbook(hostname,outputs,commands,errors,args,folder,logger):
     success=sum(bool(outputs.get(c,'')) and c not in errors for c in commands)
     summary=dict(facts,success_count=success,fail_count=len(commands)-success)
     sheets=[('Summary',list(summary.keys()),[list(summary.values())])]
+    parse_report=[]
     for command in commands:
-        if command in errors:sheets.append((command,['Error'],[[errors[command]]]))
+        if command in errors:
+            headers,rows=['Error'],[[errors[command]]]
+            engine,status,note='NONE','ERROR',str(errors[command])[:120]
         else:
-            hdr,rows=command_table(command,outputs.get(command,''))
-            sheets.append((command,hdr,rows))
-        logger.info('Command %s: %s',command,'FAIL' if command in errors else 'PASS')
+            headers,rows,engine,status,note=table_from_engine(command,outputs.get(command,''),args,logger)
+        sheets.append((command,headers,rows))
+        parse_report.append([command,engine,status,len(rows),len(headers),note])
+        logger.info('Command %s: %s | Parser %s | Rows %d | %s',
+                    command,status,engine,len(rows),note)
+    sheets.insert(1,('Parsing_Summary',
+                     ['Command','Parser','Status','Records','Columns','Details'],parse_report))
     file=folder/f'{safe_filename(hostname)}_Commands.xlsx'
     workbook_xlsx(file,sheets,args.overwrite)
     logger.info('Saved workbook %s',file)
@@ -1269,6 +1616,8 @@ def create_config(args):
 def main(argv=None):
     args=cli(argv)
     try:
+        if args.parser_check:return parser_check(args)
+        if args.parser_test:return parser_test(args)
         if args.create_config:return create_config(args)
         targets=get_targets(args)
         if not targets:raise ValueError('Empty device inventory')
