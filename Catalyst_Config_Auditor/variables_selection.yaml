@@ -1,49 +1,41 @@
-# Catalyst Config Auditor v1.3.5
-# Select which values --vars extracts from Running_Config.txt.
-# Adjust true/false and fields to match your project.
+# Catalyst Config Auditor v1.3.7 - variables extracted from saved running-config.
+# DAI is extracted only when explicitly configured per interface.
+# arp_trust: true means the trust command exists.
+# arp_limit_rate: N means the rate command exists.
+# Missing keys never trigger default DAI commands in Jinja2.
 extract:
   hostname: true
-
   banner:
     serial_number: true
     location: true
     city: false
-
   vlans:
     enabled: true
-    ids: []                 # Empty = include all configured VLANs
-
+    ids: []
   svis:
     enabled: true
     include_all: true
     fields: [name, description, shutdown, ip_addresses]
-
   loopbacks:
     enabled: true
     include_all: true
-
   routed_interfaces:
     enabled: true
     include_all: true
-
   bgp:
     enabled: true
     fields: [asn, router_id, neighbors]
-    include_passwords: true  # BGP secrets may be exported. Protect YAML files.
-
+    include_passwords: true  # Protect generated files; secrets may be present.
   interfaces:
     enabled: true
-    mode: access             # access | all
-    fields: [name, description, access_vlan, voice_vlan, mode, arp_trust]
-    arp_inspection: true
+    mode: access              # access | all
+    fields: [name, description, access_vlan, voice_vlan, mode, arp_trust, arp_limit_rate]
+    arp_inspection: true      # Enable optional arp_trust and arp_limit_rate fields
     include_dai_interfaces: true
     compact: false
-
   ntp:
     enabled: false
-
   tacacs:
     enabled: false
-
   ospf:
     enabled: false
