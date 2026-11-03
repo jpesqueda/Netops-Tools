@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Cisco Command Parser v1.1.0. Parse offline Cisco command captures to JSON/Excel.
+"""Cisco Command Parser v1.1.1. Parse offline Cisco command captures to JSON/Excel.
 
-Requires Python 3.10+ and artifact_tool (Excel export only).
+Requires Python 3.10+ and openpyxl (Excel export only).
 No pyATS, Genie or live device connection required.
 """
-__version__='1.1.0'
+__version__='1.1.1'
 import argparse
 import json
 import logging
@@ -117,7 +117,7 @@ def main(argv=None):
         blocks,parsed,device,summary=parse_capture(text,progress,task)
     if not blocks:arg.error('No commands found. Expected ===== / show ... / ===== blocks')
     master=consolidate(parsed)
-    payload={'schema_version':'1.1.0','source_file':str(args.input),'device':device,'command_summary':summary,'commands':parsed,'interfaces_master':master}
+    payload={'schema_version':'1.1.1','source_file':str(args.input),'device':device,'command_summary':summary,'commands':parsed,'interfaces_master':master}
     payload['unparsed_raw_commands']=[b for b in blocks if b['status']!='PARSED']
     if args.raw_json:payload['raw_commands']=blocks
     if args.json:json_path.write_text(json.dumps(payload,indent=2,ensure_ascii=False),encoding='utf-8')
@@ -126,7 +126,7 @@ def main(argv=None):
             from exporters.excel_exporter import excel_export
             excel_export(excel_path,device,blocks,parsed,master,summary)
         except ImportError as exc:
-            console.print('[red]Excel export requires artifact-tool. Install with: py -m pip install -r requirements.txt[/red]');raise SystemExit(2) from exc
+            console.print('[red]Excel export requires openpyxl. Install with: py -m pip install openpyxl[/red]');raise SystemExit(2) from exc
     logging.info('Completed %s blocks, %s interface records in %.2fs',len(blocks),len(master),time.monotonic()-start)
     show_results(summary, device, master, paths, log_dir / 'parser.log', time.monotonic()-start)
     return 0
