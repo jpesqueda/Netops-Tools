@@ -1,0 +1,32 @@
+Parsing commands ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 100% 15/15
+╭──────────────────────────────────────────────────────────────────────────────╮
+│ CISCO COMMAND PARSER  v1.1.0                                                 │
+│ Device: SW01                                                                 │
+╰──────────────────────────────────────────────────────────────────────────────╯
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━━━━━┓
+┃ COMMAND                           ┃ RECORDS ┃   STATUS    ┃
+┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━━━━━┩
+│ show version                      │       1 │   PARSED    │
+│ show inventory                    │       2 │   PARSED    │
+│ show interfaces status            │       4 │   PARSED    │
+│ show interfaces description       │       4 │   PARSED    │
+│ show interfaces counters          │       4 │   PARSED    │
+│ show interfaces counters errors   │       4 │   PARSED    │
+│ show interfaces trunk             │       1 │   PARSED    │
+│ show ip interface brief           │       7 │   PARSED    │
+│ show vlan brief                   │       4 │   PARSED    │
+│ show ip arp                       │       3 │   PARSED    │
+│ show ip arp inspection interfaces │       3 │   PARSED    │
+│ show ip dhcp snooping binding     │       2 │   PARSED    │
+│ show device-tracking database     │       3 │   PARSED    │
+│ show environment all              │       6 │   PARSED    │
+│ show logging                      │       0 │ UNSUPPORTED │
+└───────────────────────────────────┴─────────┴─────────────┘
+
+SUMMARY
+  Commands: 15   Parsed: 14   Skipped: 1   Errors: 0
+  Master interfaces: 7   Duration: 5.94s
+GENERATED FILES
+  PASS  /mnt/data/SW01_Audit_v1.1.0.xlsx
+  PASS  /mnt/data/SW01_Audit_v1.1.0.json
+  Log: /mnt/data/Logs/parser.log

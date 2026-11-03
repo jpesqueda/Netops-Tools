@@ -1,0 +1,2 @@
+artifact-tool
+rich>=13.0,<15

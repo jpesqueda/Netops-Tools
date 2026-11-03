@@ -1,0 +1,26 @@
+usage: Cisco_Command_Parser.py [-h] [-o OUTPUT] [--json] [--no-excel]
+                               [--excel] [--raw-json] [--overwrite]
+                               input
+
+Offline Cisco IOS-XE command capture parser (v1.1.0)
+
+positional arguments:
+  input                Input TXT with ===== / show command / ===== blocks
+
+options:
+  -h, --help           show this help message and exit
+  -o, --output OUTPUT  Output Excel file or directory (default:
+                       <input>_Audit.xlsx)
+  --json               Export structured JSON as well as Excel (unless --no-
+                       excel)
+  --no-excel           Skip Excel generation (use with --json)
+  --excel              Explicitly enable Excel generation (default)
+  --raw-json           Include raw command outputs in JSON
+  --overwrite          Allow replacing existing output files
+
+Examples:
+  python Cisco_Command_Parser.py Commands_Output.txt
+  python Cisco_Command_Parser.py Commands_Output.txt -o SW01_Audit.xlsx
+  python Cisco_Command_Parser.py Commands_Output.txt --json
+  python Cisco_Command_Parser.py Commands_Output.txt --json --excel
+  python Cisco_Command_Parser.py Commands_Output.txt --raw-json --overwrite
