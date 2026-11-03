@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""Cisco Command Parser v1.1.1. Parse offline Cisco command captures to JSON/Excel.
+"""Cisco Command Parser v1.1.2. Parse offline Cisco command captures to JSON/Excel.
 
 Requires Python 3.10+ and openpyxl (Excel export only).
 No pyATS, Genie or live device connection required.
 """
-__version__='1.1.1'
+__version__='1.1.2'
 import argparse
 import json
+import importlib.util
+import traceback
 import logging
 import sys
 import time
@@ -81,14 +83,27 @@ def parse_capture(src, progress=None, task_id=None):
 
 def main(argv=None):
     arg=argparse.ArgumentParser(description='Offline Cisco IOS-XE command capture parser (v'+__version__+')',formatter_class=argparse.RawDescriptionHelpFormatter,epilog='Examples:\n  python Cisco_Command_Parser.py Commands_Output.txt\n  python Cisco_Command_Parser.py Commands_Output.txt -o SW01_Audit.xlsx\n  python Cisco_Command_Parser.py Commands_Output.txt --json\n  python Cisco_Command_Parser.py Commands_Output.txt --json --excel\n  python Cisco_Command_Parser.py Commands_Output.txt --raw-json --overwrite')
-    arg.add_argument('input',type=Path,help='Input TXT with ===== / show command / ===== blocks')
+    arg.add_argument('input',nargs='?',type=Path,help='Input TXT with ===== / show command / ===== blocks')
     arg.add_argument('-o','--output',type=Path,help='Output Excel file or directory (default: <input>_Audit.xlsx)')
     arg.add_argument('--json',action='store_true',help='Export structured JSON as well as Excel (unless --no-excel)')
     arg.add_argument('--no-excel',action='store_true',help='Skip Excel generation (use with --json)')
     arg.add_argument('--excel',action='store_true',help='Explicitly enable Excel generation (default)')
     arg.add_argument('--raw-json',action='store_true',help='Include raw command outputs in JSON')
+    arg.add_argument('--diagnose',action='store_true',help='Print Python interpreter and Excel dependencies, then exit')
     arg.add_argument('--overwrite',action='store_true',help='Allow replacing existing output files')
     args=arg.parse_args(argv)
+    if args.diagnose:
+        console.print(f'Python executable: {sys.executable}')
+        console.print(f'Python version: {sys.version.split()[0]}')
+        for package in ('openpyxl', 'rich'):
+            try:
+                imported = __import__(package)
+                console.print(f'[green]PASS[/green] {package}: {getattr(imported, "__version__", "unknown")} | {getattr(imported, "__file__", "unknown")}')
+            except Exception as exc:
+                console.print(f'[red]ERROR[/red] {package}: {type(exc).__name__}: {exc}')
+                traceback.print_exc()
+        return 0
+    if args.input is None:arg.error('Input TXT is required unless --diagnose is used')
     if args.no_excel and not args.json:arg.error('Nothing to export: specify --json or remove --no-excel')
     if not args.input.is_file():arg.error(f'Input file does not exist: {args.input}')
     dest=args.output or args.input.with_name(args.input.stem+'_Audit.xlsx')
@@ -117,7 +132,7 @@ def main(argv=None):
         blocks,parsed,device,summary=parse_capture(text,progress,task)
     if not blocks:arg.error('No commands found. Expected ===== / show ... / ===== blocks')
     master=consolidate(parsed)
-    payload={'schema_version':'1.1.1','source_file':str(args.input),'device':device,'command_summary':summary,'commands':parsed,'interfaces_master':master}
+    payload={'schema_version':'1.1.2','source_file':str(args.input),'device':device,'command_summary':summary,'commands':parsed,'interfaces_master':master}
     payload['unparsed_raw_commands']=[b for b in blocks if b['status']!='PARSED']
     if args.raw_json:payload['raw_commands']=blocks
     if args.json:json_path.write_text(json.dumps(payload,indent=2,ensure_ascii=False),encoding='utf-8')
@@ -126,7 +141,16 @@ def main(argv=None):
             from exporters.excel_exporter import excel_export
             excel_export(excel_path,device,blocks,parsed,master,summary)
         except ImportError as exc:
-            console.print('[red]Excel export requires openpyxl. Install with: py -m pip install openpyxl[/red]');raise SystemExit(2) from exc
+            logging.exception('Import error during Excel export')
+            console.print(f'[red]Excel import error: {type(exc).__name__}: {exc}[/red]')
+            console.print(f'[yellow]Python interpreter: {sys.executable}[/yellow]')
+            console.print('[yellow]Run: python Cisco_Command_Parser.py --diagnose[/yellow]')
+            raise SystemExit(2) from exc
+        except Exception as exc:
+            logging.exception('Excel export failure')
+            console.print(f'[red]Excel export failed: {type(exc).__name__}: {exc}[/red]')
+            console.print(f'[yellow]See detailed traceback in: {log_dir / "parser.log"}[/yellow]')
+            raise SystemExit(2) from exc
     logging.info('Completed %s blocks, %s interface records in %.2fs',len(blocks),len(master),time.monotonic()-start)
     show_results(summary, device, master, paths, log_dir / 'parser.log', time.monotonic()-start)
     return 0
