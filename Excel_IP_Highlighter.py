@@ -1,3 +1,35 @@
+#!/usr/bin/env python3
+"""Highlight Excel cells containing any IP address from a text file."""
+
+import argparse
+from ipaddress import ip_address
+from pathlib import Path
+import re
+from zipfile import BadZipFile
+
+
+VERSION = "1.0.0"
+YELLOW = "FFFFFF00"
+# Match whole IP tokens, not prefixes of longer addresses. A final sentence
+# period is allowed. IPv6 is scanned first to handle IPv4-mapped IPv6 tokens.
+IPV4_TOKEN = re.compile(r"(?<![\w.])(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?!\w|\.[\w.])")
+IPV6_TOKEN = re.compile(r"(?<![\w.])(?:[0-9a-fA-F]*:){2,}[0-9a-fA-F:.]*(?![\w:.])")
+
+
+def read_hosts(path):
+    """Read one address per line. Blank lines, # comments and duplicates are OK."""
+    hosts = set()
+    with path.open(encoding="utf-8-sig") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            entry = line.partition("#")[0].strip()
+            if not entry:
+                continue
+            try:
+                hosts.add(normalize_ip(entry))
+            except ValueError as exc:
+                raise ValueError(f"{path}, línea {line_number}: IP no válida.") from exc
+    if not hosts:
+        raise ValueError(f"No se encontraron IPs en {path}.")
     return hosts
 
 
